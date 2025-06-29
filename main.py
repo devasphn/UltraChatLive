@@ -9,8 +9,8 @@ import websockets
 import threading
 import ssl
 import os
-from aiohttp import web, web_runner, web_ws
-from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
+from aiohttp import web, web_runner, WSMsgType  # Fixed import
+from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack, RTCIceCandidate
 from aiortc.contrib.media import MediaRecorder, MediaRelay
 from transformers import pipeline
 from chatterbox.tts import ChatterboxTTS
@@ -200,13 +200,19 @@ class AudioStreamTrack(MediaStreamTrack):
         super().__init__()
         self.buffer = AudioBuffer()
         self.tts = OptimizedTTS()
+        self._response_queue = asyncio.Queue()
         
     async def recv(self):
         """Receive audio frame from WebRTC"""
         pts, time_base = await self.next_timestamp()
         
-        # Create empty frame (we're primarily receiving, not sending initially)
-        frame = np.zeros(1600, dtype=np.float32)  # 0.1 seconds at 16kHz
+        # Check if we have response audio to send
+        try:
+            response_audio = self._response_queue.get_nowait()
+            frame = response_audio[:1600]  # Take first 0.1 seconds
+        except asyncio.QueueEmpty:
+            # Create empty/silence frame
+            frame = np.zeros(1600, dtype=np.float32)  # 0.1 seconds at 16kHz
         
         from aiortc import AudioFrame
         audio_frame = AudioFrame.from_ndarray(frame.reshape(1, -1), format="flt", layout="mono")
@@ -236,8 +242,8 @@ class AudioStreamTrack(MediaStreamTrack):
             if response_text.strip():
                 # Generate TTS
                 response_audio = self.tts.synthesize(response_text)
-                # Send back through WebRTC (implementation would depend on connection setup)
-                await self._send_audio_response(response_audio)
+                # Queue response audio for sending
+                await self._response_queue.put(response_audio)
                 
         except Exception as e:
             print(f"Error processing speech: {e}")
@@ -280,11 +286,6 @@ class AudioStreamTrack(MediaStreamTrack):
         except Exception as e:
             print(f"Error generating response: {e}")
             return "I'm sorry, I couldn't process that."
-    
-    async def _send_audio_response(self, audio_data):
-        """Send audio response back (to be implemented based on connection)"""
-        # This would be implemented to send audio back through WebRTC connection
-        print(f"Generated audio response: {len(audio_data)} samples")
 
 class WebRTCConnection:
     def __init__(self):
@@ -327,7 +328,7 @@ async def websocket_handler(request):
     
     try:
         async for msg in ws:
-            if msg.type == web.WSMessageType.TEXT:
+            if msg.type == WSMsgType.TEXT:  # Fixed: Use WSMsgType instead of web.WSMessageType
                 try:
                     data = json.loads(msg.data)
                     pc = webrtc_connection.pc
@@ -352,13 +353,20 @@ async def websocket_handler(request):
                         
                     elif data["type"] == "ice-candidate":
                         # Handle ICE candidate
-                        candidate = data["candidate"]
+                        candidate_data = data["candidate"]
+                        candidate = RTCIceCandidate(
+                            candidate=candidate_data.get("candidate"),
+                            sdpMid=candidate_data.get("sdpMid"),
+                            sdpMLineIndex=candidate_data.get("sdpMLineIndex")
+                        )
                         await pc.addIceCandidate(candidate)
                         
+                except json.JSONDecodeError as e:
+                    print(f"JSON decode error: {e}")
                 except Exception as e:
                     print(f"Error handling WebSocket message: {e}")
                     
-            elif msg.type == web.WSMessageType.ERROR:
+            elif msg.type == WSMsgType.ERROR:  # Fixed: Use WSMsgType
                 print(f'WebSocket error: {ws.exception()}')
                 break
                 
