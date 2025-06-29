@@ -13,7 +13,7 @@ import fractions
 from aiohttp import web, web_runner, WSMsgType
 from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack, RTCIceCandidate
 import av  # PyAV for AudioFrame
-from aiortc.contrib.media import MediaRecorder, MediaRelay
+from aiortc.contrib.media import MediaRecorder, MediaRelay, MediaBlackhole
 from transformers import pipeline
 from chatterbox.tts import ChatterboxTTS
 from concurrent.futures import ThreadPoolExecutor
@@ -24,6 +24,9 @@ import time
 
 warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.INFO)
+
+# CRITICAL FIX: Suppress empty candidate warnings
+logging.getLogger('aioice.ice').setLevel(logging.WARNING)
 
 # Global variables for models
 uv_pipe = None
@@ -200,7 +203,7 @@ class OptimizedTTS:
         return result
 
 class AudioStreamTrack(MediaStreamTrack):
-    """FIXED: Audio track with working response queue"""
+    """FIXED: Audio track with working response queue and proper consumer"""
     kind = "audio"
     
     def __init__(self):
@@ -213,6 +216,26 @@ class AudioStreamTrack(MediaStreamTrack):
         # Initialize timestamp tracking
         self._timestamp = 0
         self._time_base = fractions.Fraction(1, 16000)
+        
+        # CRITICAL FIX: Start the consumer task
+        self._consumer_task = None
+        
+    def start_consumer(self):
+        """Start the audio consumer task"""
+        if self._consumer_task is None:
+            self._consumer_task = asyncio.create_task(self._consume_audio())
+            print("🎧 Audio consumer started")
+        
+    async def _consume_audio(self):
+        """CRITICAL FIX: Consumer task that calls recv() continuously"""
+        try:
+            while True:
+                await self.recv()
+                await asyncio.sleep(0.1)  # 100ms intervals
+        except asyncio.CancelledError:
+            print("🛑 Audio consumer stopped")
+        except Exception as e:
+            print(f"❌ Audio consumer error: {e}")
         
     async def recv(self):
         """FIXED: Audio frame generation with proper response handling"""
@@ -261,6 +284,7 @@ class AudioStreamTrack(MediaStreamTrack):
     
     def process_audio_data(self, audio_data):
         """Process incoming audio data"""
+        print(f"📥 Received audio data: {audio_data.shape}")
         self.buffer.add_audio(audio_data)
         
         if self.buffer.should_process():
@@ -336,6 +360,7 @@ class WebRTCConnection:
     def __init__(self):
         self.pc = RTCPeerConnection()
         self.audio_track = AudioStreamTrack()
+        self.recorder = None  # CRITICAL FIX: Add recorder for consuming outgoing audio
         
         # Add event handlers
         @self.pc.on("datachannel")
@@ -418,6 +443,14 @@ async def websocket_handler(request):
                         # Add audio track
                         pc.addTrack(webrtc_connection.audio_track)
                         
+                        # CRITICAL FIX: Add recorder to consume the outgoing audio track
+                        webrtc_connection.recorder = MediaBlackhole()
+                        webrtc_connection.recorder.addTrack(webrtc_connection.audio_track)
+                        await webrtc_connection.recorder.start()
+                        
+                        # CRITICAL FIX: Start the audio consumer
+                        webrtc_connection.audio_track.start_consumer()
+                        
                         # Create answer
                         answer = await pc.createAnswer()
                         await pc.setLocalDescription(answer)
@@ -465,17 +498,20 @@ async def websocket_handler(request):
     except Exception as e:
         print(f"WebSocket handler error: {e}")
     finally:
+        # Cleanup
+        if webrtc_connection.recorder:
+            await webrtc_connection.recorder.stop()
         await webrtc_connection.pc.close()
         print(f"🔌 Closed WebSocket connection: {connection_id}")
     
     return ws
 
-# HTML client interface
+# HTML client interface (same as before)
 HTML_CLIENT = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>UltraChat S2S - Working Version</title>
+    <title>UltraChat S2S - Fixed Consumer</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -584,10 +620,10 @@ HTML_CLIENT = """
 </head>
 <body>
     <div class="container">
-        <h1>🎤 UltraChat S2S - Working Version</h1>
+        <h1>🎤 UltraChat S2S - Fixed Consumer</h1>
         
         <div class="fix-note">
-            <strong>✅ Fixed:</strong> Audio processing pipeline corrected. AI responses now working properly.
+            <strong>✅ Fixed:</strong> Added MediaBlackhole consumer and audio consumer task. Audio processing now working.
         </div>
         
         <div class="controls">
@@ -685,54 +721,45 @@ HTML_CLIENT = """
                         { urls: 'stun:stun1.l.google.com:19302' }
                     ]
                 });
-        
+                
                 localStream.getTracks().forEach(track => {
                     peerConnection.addTrack(track, localStream);
                 });
-        
+                
                 peerConnection.ontrack = (event) => {
                     const [remoteStream] = event.streams;
                     playAudio(remoteStream);
                 };
-        
-                // FIXED: Proper ICE candidate filtering
+                
                 peerConnection.onicecandidate = (event) => {
                     if (event.candidate && websocket.readyState === WebSocket.OPEN) {
-                        // Check if candidate is valid (not empty or null)
                         const candidateStr = event.candidate.candidate;
                         if (candidateStr && candidateStr.trim() !== '' && candidateStr !== 'null') {
                             websocket.send(JSON.stringify({
                                 type: 'ice-candidate',
                                 candidate: event.candidate
                             }));
-                            console.log('✅ Sent valid ICE candidate');
-                        } else {
-                            console.log('⚠️ Filtered empty ICE candidate');
                         }
-                    } else if (event.candidate === null) {
-                        // End of candidates - this is normal, don't send anything
-                        console.log('🏁 ICE candidate gathering complete');
                     }
                 };
-        
+                
                 const offer = await peerConnection.createOffer();
                 await peerConnection.setLocalDescription(offer);
-        
+                
                 if (websocket.readyState === WebSocket.OPEN) {
                     websocket.send(JSON.stringify({
                         type: 'offer',
                         sdp: offer.sdp
                     }));
                 }
-        
+                
                 updateStatus('Ready - Start speaking!', 'connected');
-        
+                
             } catch (error) {
                 updateStatus('WebRTC setup error: ' + error.message, 'error');
                 console.error('WebRTC error:', error);
             }
         }
-
         
         async function handleSignalingMessage(event) {
             try {
