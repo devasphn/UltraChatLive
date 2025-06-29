@@ -5,13 +5,14 @@ import logging
 import numpy as np
 import tempfile
 import torchaudio
-import websockets
 import threading
-import ssl
-import os
-from aiohttp import web, web_runner, WSMsgType  # Fixed import
-from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack, RTCIceCandidate
-from aiortc.contrib.media import MediaRecorder, MediaRelay
+import time
+import fractions
+from aiohttp import web, WSMsgType
+from aiortc import RTCPeerConnection, RTCSessionDescription, RTCIceCandidate
+from aiortc import MediaStreamTrack
+from aiortc.mediastreams import AudioStreamTrack as BaseAudioStreamTrack
+from av import AudioFrame
 from transformers import pipeline
 from chatterbox.tts import ChatterboxTTS
 from concurrent.futures import ThreadPoolExecutor
@@ -32,7 +33,6 @@ class SileroVAD:
     def __init__(self):
         """Initialize Silero VAD model"""
         try:
-            # Load Silero VAD model
             self.model, utils = torch.hub.load(
                 repo_or_dir='snakers4/silero-vad',
                 model='silero_vad',
@@ -55,10 +55,9 @@ class SileroVAD:
     def detect_speech(self, audio_tensor, sample_rate=16000):
         """Detect speech in audio tensor"""
         if self.model is None:
-            return True  # Fallback: assume speech is present
+            return True
         
         try:
-            # Ensure audio is float32 and 1D
             if isinstance(audio_tensor, np.ndarray):
                 audio_tensor = torch.from_numpy(audio_tensor)
             
@@ -68,7 +67,6 @@ class SileroVAD:
             if len(audio_tensor.shape) > 1:
                 audio_tensor = audio_tensor.squeeze()
             
-            # Get speech timestamps
             speech_timestamps = self.get_speech_timestamps(
                 audio_tensor, 
                 self.model,
@@ -82,7 +80,7 @@ class SileroVAD:
             
         except Exception as e:
             print(f"VAD error: {e}")
-            return True  # Fallback
+            return True
 
 def initialize_models():
     """Initialize all models once at startup"""
@@ -126,8 +124,8 @@ class AudioBuffer:
         self.buffer = collections.deque(maxlen=self.max_samples)
         self.speech_detected = False
         self.silence_counter = 0
-        self.min_speech_samples = int(0.5 * sample_rate)  # 0.5 seconds
-        self.max_silence_samples = int(1.0 * sample_rate)  # 1 second
+        self.min_speech_samples = int(0.5 * sample_rate)
+        self.max_silence_samples = int(1.0 * sample_rate)
         
     def add_audio(self, audio_data):
         """Add audio data to buffer"""
@@ -149,19 +147,17 @@ class AudioBuffer:
             return False
             
         audio_array = self.get_audio_array()
-        
-        # Use VAD to detect speech
         has_speech = vad_model.detect_speech(audio_array, self.sample_rate)
         
         if has_speech:
             self.speech_detected = True
             self.silence_counter = 0
-            return False  # Continue collecting
+            return False
         else:
             if self.speech_detected:
-                self.silence_counter += len(audio_array) // 1000  # Rough increment
+                self.silence_counter += len(audio_array) // 1000
                 if self.silence_counter >= self.max_silence_samples // 1000:
-                    return True  # Process now
+                    return True
             return False
     
     def reset(self):
@@ -177,10 +173,8 @@ class OptimizedTTS:
     def synthesize(self, text: str) -> np.ndarray:
         """Optimized TTS synthesis returning numpy array"""
         if not text.strip():
-            # Return silence for empty text
-            return np.zeros(1600, dtype=np.float32)  # 0.1 seconds
+            return np.zeros(1600, dtype=np.float32)
 
-        # Generate audio with optimizations
         with torch.inference_mode():
             wav = tts_model.generate(text)
             
@@ -189,60 +183,73 @@ class OptimizedTTS:
         if wav.dim() == 1:
             wav = wav.unsqueeze(0)
             
-        # Convert to numpy array
         return wav.cpu().numpy().flatten().astype(np.float32)
 
-class AudioStreamTrack(MediaStreamTrack):
-    """Custom audio track for WebRTC"""
+class CustomAudioStreamTrack(BaseAudioStreamTrack):
+    """FIXED: Custom audio track with proper timestamp handling"""
     kind = "audio"
     
     def __init__(self):
-        super().__init__()
+        super().__init__()  # Initialize base AudioStreamTrack
         self.buffer = AudioBuffer()
         self.tts = OptimizedTTS()
         self._response_queue = asyncio.Queue()
+        # Initialize timing variables properly
+        self.sample_rate = 16000
+        self.samples_per_frame = int(0.02 * self.sample_rate)  # 20ms frames
         
     async def recv(self):
-        """Receive audio frame from WebRTC"""
-        pts, time_base = await self.next_timestamp()
-        
+        """FIXED: Proper AudioFrame generation without next_timestamp()"""
         # Check if we have response audio to send
         try:
             response_audio = self._response_queue.get_nowait()
-            frame = response_audio[:1600]  # Take first 0.1 seconds
+            # Use response audio
+            frame_data = response_audio[:self.samples_per_frame].astype(np.int16)
         except asyncio.QueueEmpty:
-            # Create empty/silence frame
-            frame = np.zeros(1600, dtype=np.float32)  # 0.1 seconds at 16kHz
+            # Create silence frame
+            frame_data = np.zeros(self.samples_per_frame, dtype=np.int16)
         
-        from aiortc import AudioFrame
-        audio_frame = AudioFrame.from_ndarray(frame.reshape(1, -1), format="flt", layout="mono")
-        audio_frame.pts = pts
-        audio_frame.time_base = time_base
-        audio_frame.sample_rate = 16000
+        # FIXED: Handle timing like base AudioStreamTrack
+        if hasattr(self, "_timestamp"):
+            self._timestamp += self.samples_per_frame
+            wait = self._start + (self._timestamp / self.sample_rate) - time.time()
+            if wait > 0:
+                await asyncio.sleep(wait)
+        else:
+            self._start = time.time()
+            self._timestamp = 0
         
-        return audio_frame
+        # Create AudioFrame with proper format
+        frame = AudioFrame(format="s16", layout="mono", samples=self.samples_per_frame)
+        
+        # Fill frame data
+        frame_bytes = frame_data.tobytes()
+        for p in frame.planes:
+            p.update(frame_bytes[:len(p)])
+        
+        # Set timing properties
+        frame.pts = self._timestamp
+        frame.sample_rate = self.sample_rate
+        frame.time_base = fractions.Fraction(1, self.sample_rate)
+        
+        return frame
     
     def process_audio_data(self, audio_data):
         """Process incoming audio data"""
         self.buffer.add_audio(audio_data)
         
         if self.buffer.should_process():
-            # Get audio for processing
             audio_array = self.buffer.get_audio_array()
             if len(audio_array) > 0:
-                # Process in background
                 asyncio.create_task(self._process_speech(audio_array))
             self.buffer.reset()
     
     async def _process_speech(self, audio_array):
         """Process speech and generate response"""
         try:
-            # Generate response
             response_text = await self._generate_response(audio_array)
             if response_text.strip():
-                # Generate TTS
                 response_audio = self.tts.synthesize(response_text)
-                # Queue response audio for sending
                 await self._response_queue.put(response_audio)
                 
         except Exception as e:
@@ -290,9 +297,8 @@ class AudioStreamTrack(MediaStreamTrack):
 class WebRTCConnection:
     def __init__(self):
         self.pc = RTCPeerConnection()
-        self.audio_track = AudioStreamTrack()
+        self.audio_track = CustomAudioStreamTrack()  # Use fixed track
         
-        # Add event handlers
         @self.pc.on("datachannel")
         def on_datachannel(channel):
             print(f"Data channel created: {channel.label}")
@@ -301,7 +307,6 @@ class WebRTCConnection:
         def on_track(track):
             print(f"Track received: {track.kind}")
             if track.kind == "audio":
-                # Handle incoming audio
                 asyncio.create_task(self._handle_audio_track(track))
     
     async def _handle_audio_track(self, track):
@@ -316,8 +321,6 @@ class WebRTCConnection:
             except Exception as e:
                 print(f"Error handling audio track: {e}")
                 break
-
-# Replace your websocket_handler function with this corrected version:
 
 async def websocket_handler(request):
     """Handle WebSocket connections using aiohttp"""
@@ -335,15 +338,13 @@ async def websocket_handler(request):
                     pc = webrtc_connection.pc
                     
                     if data["type"] == "offer":
-                        # Handle WebRTC offer
                         await pc.setRemoteDescription(RTCSessionDescription(
                             sdp=data["sdp"], type=data["type"]
                         ))
                         
-                        # Add audio track
+                        # Add our custom audio track
                         pc.addTrack(webrtc_connection.audio_track)
                         
-                        # Create answer
                         answer = await pc.createAnswer()
                         await pc.setLocalDescription(answer)
                         
@@ -353,28 +354,13 @@ async def websocket_handler(request):
                         }))
                         
                     elif data["type"] == "ice-candidate":
-                        # Handle ICE candidate - FIXED VERSION
+                        # FIXED: Handle ICE candidate properly
                         candidate_data = data["candidate"]
                         
-                        # Create RTCIceCandidate with correct parameters
-                        candidate = RTCIceCandidate(
-                            component=candidate_data.get("component", 1),
-                            foundation=candidate_data.get("foundation", ""),
-                            ip=candidate_data.get("address", ""),
-                            port=candidate_data.get("port", 0),
-                            priority=candidate_data.get("priority", 0),
-                            protocol=candidate_data.get("protocol", "udp"),
-                            type=candidate_data.get("type", "host"),
-                            sdpMid=candidate_data.get("sdpMid"),
-                            sdpMLineIndex=candidate_data.get("sdpMLineIndex")
-                        )
-                        
-                        # Alternative approach - parse the candidate string if available
-                        if "candidate" in candidate_data:
-                            # Parse the candidate string format
-                            candidate_str = candidate_data["candidate"]
-                            parts = candidate_str.split()
-                            
+                        # Create RTCIceCandidate from the candidate string
+                        if isinstance(candidate_data, str):
+                            # Parse candidate string format
+                            parts = candidate_data.split()
                             if len(parts) >= 8:
                                 candidate = RTCIceCandidate(
                                     component=int(parts[1]),
@@ -384,19 +370,29 @@ async def websocket_handler(request):
                                     priority=int(parts[3]),
                                     protocol=parts[2],
                                     type=parts[7],
-                                    sdpMid=candidate_data.get("sdpMid"),
-                                    sdpMLineIndex=candidate_data.get("sdpMLineIndex")
+                                    sdpMid=data.get("sdpMid"),
+                                    sdpMLineIndex=data.get("sdpMLineIndex")
                                 )
-                        
-                        await pc.addIceCandidate(candidate)
+                                await pc.addIceCandidate(candidate)
+                        elif isinstance(candidate_data, dict):
+                            # Handle dict format
+                            candidate = RTCIceCandidate(
+                                component=candidate_data.get("component", 1),
+                                foundation=candidate_data.get("foundation", ""),
+                                ip=candidate_data.get("address", ""),
+                                port=candidate_data.get("port", 0),
+                                priority=candidate_data.get("priority", 0),
+                                protocol=candidate_data.get("protocol", "udp"),
+                                type=candidate_data.get("type", "host"),
+                                sdpMid=candidate_data.get("sdpMid"),
+                                sdpMLineIndex=candidate_data.get("sdpMLineIndex")
+                            )
+                            await pc.addIceCandidate(candidate)
                         
                 except json.JSONDecodeError as e:
                     print(f"JSON decode error: {e}")
                 except Exception as e:
                     print(f"Error handling WebSocket message: {e}")
-                    # Print more details for debugging
-                    if "ice-candidate" in str(e):
-                        print(f"ICE candidate data: {data.get('candidate', 'No candidate data')}")
                     
             elif msg.type == WSMsgType.ERROR:
                 print(f'WebSocket error: {ws.exception()}')
@@ -408,12 +404,13 @@ async def websocket_handler(request):
         await webrtc_connection.pc.close()
     
     return ws
-# HTML client interface with HTTPS/WSS support
+
+# HTML client interface - same as before
 HTML_CLIENT = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Real-time S2S Chat</title>
+    <title>Real-time S2S Chat - Fixed</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -515,14 +512,14 @@ HTML_CLIENT = """
 </head>
 <body>
     <div class="container">
-        <h1>🎤 Real-time S2S AI Chat</h1>
+        <h1>🎤 Real-time S2S AI Chat (FIXED)</h1>
         
         <div class="controls">
             <button id="startBtn" class="start-btn">Start Conversation</button>
             <button id="stopBtn" class="stop-btn" disabled>Stop Conversation</button>
         </div>
         
-        <div id="status" class="status">Ready to connect</div>
+        <div id="status" class="status">Ready to connect - Fixed AudioStreamTrack</div>
         
         <div class="audio-visualizer" id="visualizer">
             Audio visualization will appear here
@@ -555,7 +552,6 @@ HTML_CLIENT = """
         startBtn.addEventListener('click', startConversation);
         stopBtn.addEventListener('click', stopConversation);
         
-        // Determine WebSocket URL based on current protocol
         function getWebSocketUrl() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const host = window.location.host;
@@ -566,7 +562,6 @@ HTML_CLIENT = """
             try {
                 updateStatus('Connecting...', '');
                 
-                // Get user media
                 localStream = await navigator.mediaDevices.getUserMedia({
                     audio: {
                         echoCancellation: true,
@@ -576,10 +571,8 @@ HTML_CLIENT = """
                     }
                 });
                 
-                // Setup audio visualization
                 setupAudioVisualization();
                 
-                // Connect WebSocket using the same host and protocol
                 const wsUrl = getWebSocketUrl();
                 console.log('Connecting to:', wsUrl);
                 websocket = new WebSocket(wsUrl);
@@ -611,36 +604,37 @@ HTML_CLIENT = """
         async function setupWebRTC() {
             try {
                 peerConnection = new RTCPeerConnection({
-                    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' },
+                        { urls: 'stun:stun1.l.google.com:19302' }
+                    ]
                 });
                 
-                // Add local stream
                 localStream.getTracks().forEach(track => {
                     peerConnection.addTrack(track, localStream);
                 });
                 
-                // Handle incoming audio
                 peerConnection.ontrack = (event) => {
                     const [remoteStream] = event.streams;
                     playAudio(remoteStream);
                 };
                 
-                // Handle ICE candidates
                 peerConnection.onicecandidate = (event) => {
                     if (event.candidate && websocket.readyState === WebSocket.OPEN) {
                         websocket.send(JSON.stringify({
                             type: 'ice-candidate',
-                            candidate: event.candidate
+                            candidate: event.candidate.candidate,
+                            sdpMid: event.candidate.sdpMid,
+                            sdpMLineIndex: event.candidate.sdpMLineIndex
                         }));
                     }
                 };
                 
-                // Create offer
                 const offer = await peerConnection.createOffer();
                 await peerConnection.setLocalDescription(offer);
                 
                 if (websocket.readyState === WebSocket.OPEN) {
-                    websocket.send(JSON.stringify({
+                    websocket.send(JSON.dumps({
                         type: 'offer',
                         sdp: offer.sdp
                     }));
@@ -664,7 +658,11 @@ HTML_CLIENT = """
                         sdp: message.sdp
                     }));
                 } else if (message.type === 'ice-candidate') {
-                    await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
+                    await peerConnection.addIceCandidate(new RTCIceCandidate({
+                        candidate: message.candidate,
+                        sdpMid: message.sdpMid,
+                        sdpMLineIndex: message.sdpMLineIndex
+                    }));
                 }
             } catch (error) {
                 console.error('Error handling signaling message:', error);
@@ -754,30 +752,25 @@ async def handle_http(request):
 
 async def handle_favicon(request):
     """Handle favicon request"""
-    # Return a simple 1x1 transparent PNG
     favicon_data = b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xdb\x00\x00\x00\x00IEND\xaeB`\x82'
     return web.Response(body=favicon_data, content_type='image/png')
 
 async def main():
     """Main function"""
-    print("🚀 Initializing Real-time S2S Agent...")
+    print("🚀 Initializing Real-time S2S Agent (FIXED)...")
     
-    # Initialize models
     initialize_models()
     
     print("🎉 Starting server...")
     
-    # Create aiohttp application
     app = web.Application()
     app.router.add_get('/', handle_http)
     app.router.add_get('/ws', websocket_handler)
     app.router.add_get('/favicon.ico', handle_favicon)
     
-    # Setup and start the server
     runner = web_runner.AppRunner(app)
     await runner.setup()
     
-    # Use port 7860 as expected by RunPod
     site = web.TCPSite(runner, '0.0.0.0', 7860)
     await site.start()
     
@@ -787,7 +780,7 @@ async def main():
     print("Press Ctrl+C to stop...")
     
     try:
-        await asyncio.Future()  # Run forever
+        await asyncio.Future()
     except KeyboardInterrupt:
         print("\n🛑 Shutting down...")
     finally:
