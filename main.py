@@ -9,10 +9,10 @@ import websockets
 import threading
 import ssl
 import os
-import av
-import fractions  # CRITICAL: Missing import for timestamps
+import fractions
 from aiohttp import web, web_runner, WSMsgType
 from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack, RTCIceCandidate
+import av  # PyAV for AudioFrame
 from aiortc.contrib.media import MediaRecorder, MediaRelay
 from transformers import pipeline
 from chatterbox.tts import ChatterboxTTS
@@ -195,7 +195,7 @@ class OptimizedTTS:
         return wav.cpu().numpy().flatten().astype(np.float32)
 
 class AudioStreamTrack(MediaStreamTrack):
-    """FIXED: Custom audio track for WebRTC with proper timestamp handling"""
+    """Custom audio track for WebRTC with proper timestamp handling"""
     kind = "audio"
     
     def __init__(self):
@@ -203,13 +203,12 @@ class AudioStreamTrack(MediaStreamTrack):
         self.buffer = AudioBuffer()
         self.tts = OptimizedTTS()
         self._response_queue = asyncio.Queue()
-        # CRITICAL FIX: Initialize timestamp tracking
+        # Initialize timestamp tracking
         self._timestamp = 0
         self._time_base = fractions.Fraction(1, 16000)  # 16kHz sample rate
         
     async def recv(self):
-        """FIXED: Receive audio frame from WebRTC with proper timestamp handling"""
-        # CRITICAL FIX: Use _next_timestamp() method correctly
+        """Receive audio frame from WebRTC with proper timestamp handling"""
         frame_samples = 1600  # 0.1 seconds at 16kHz
         
         # Check if we have response audio to send
@@ -223,14 +222,14 @@ class AudioStreamTrack(MediaStreamTrack):
             # Create silence frame
             frame = np.zeros(frame_samples, dtype=np.float32)
         
-        # CRITICAL FIX: Create AudioFrame with proper format
-        audio_frame = AudioFrame.from_ndarray(
+        # Create AudioFrame using PyAV
+        audio_frame = av.AudioFrame.from_ndarray(
             frame.reshape(1, -1), 
             format="flt",  # 32-bit float
             layout="mono"
         )
         
-        # CRITICAL FIX: Set timestamp properly
+        # Set timestamp properly
         audio_frame.pts = self._timestamp
         audio_frame.time_base = self._time_base
         audio_frame.sample_rate = 16000
@@ -323,7 +322,7 @@ class WebRTCConnection:
                 asyncio.create_task(self._handle_audio_track(track))
     
     async def _handle_audio_track(self, track):
-        """FIXED: Handle incoming audio track with proper error handling"""
+        """Handle incoming audio track with proper error handling"""
         try:
             while True:
                 try:
@@ -339,9 +338,42 @@ class WebRTCConnection:
         except Exception as e:
             print(f"Error handling audio track: {e}")
 
-# FIXED: WebSocket handler with proper ICE candidate handling
+def is_valid_ice_candidate(candidate_data):
+    """
+    CRITICAL FIX: Filter out empty candidates (end-of-candidates markers)
+    Returns True if candidate is valid, False if it should be ignored
+    """
+    if not candidate_data:
+        return False
+    
+    # Check if candidate string is empty (end-of-candidates)
+    candidate_string = candidate_data.get("candidate", "")
+    if not candidate_string or candidate_string.strip() == "":
+        print("Ignoring empty candidate (end-of-candidates marker)")
+        return False
+    
+    # Additional validation for malformed candidates
+    try:
+        parts = candidate_string.split()
+        if len(parts) < 6:  # Basic ICE candidate should have at least 6 parts
+            print(f"Ignoring malformed candidate: {candidate_string}")
+            return False
+        
+        # Extract IP address (should be at index 4)
+        ip_address = parts[4]
+        if not ip_address or ip_address == "":
+            print(f"Ignoring candidate with empty IP: {candidate_string}")
+            return False
+            
+        return True
+        
+    except Exception as e:
+        print(f"Error validating candidate: {e}")
+        return False
+
+# FIXED: WebSocket handler with empty candidate filtering
 async def websocket_handler(request):
-    """Handle WebSocket connections using aiohttp"""
+    """Handle WebSocket connections using aiohttp with proper ICE candidate filtering"""
     ws = web.WebSocketResponse()
     await ws.prepare(request)
     
@@ -374,23 +406,32 @@ async def websocket_handler(request):
                         }))
                         
                     elif data["type"] == "ice-candidate":
-                        # FIXED: Handle ICE candidate properly
+                        # CRITICAL FIX: Validate candidate before processing
                         candidate_data = data["candidate"]
                         
-                        # Create RTCIceCandidate from the received data
-                        candidate = RTCIceCandidate(
-                            component=candidate_data.get("component", 1),
-                            foundation=candidate_data.get("foundation", ""),
-                            ip=candidate_data.get("address", ""),
-                            port=candidate_data.get("port", 0),
-                            priority=candidate_data.get("priority", 0),
-                            protocol=candidate_data.get("protocol", "udp"),
-                            type=candidate_data.get("type", "host"),
-                            sdpMid=candidate_data.get("sdpMid"),
-                            sdpMLineIndex=candidate_data.get("sdpMLineIndex")
-                        )
+                        if not is_valid_ice_candidate(candidate_data):
+                            # Skip empty or invalid candidates
+                            continue
                         
-                        await pc.addIceCandidate(candidate)
+                        # Create RTCIceCandidate from the received data
+                        try:
+                            candidate = RTCIceCandidate(
+                                component=candidate_data.get("component", 1),
+                                foundation=candidate_data.get("foundation", ""),
+                                ip=candidate_data.get("address", ""),
+                                port=candidate_data.get("port", 0),
+                                priority=candidate_data.get("priority", 0),
+                                protocol=candidate_data.get("protocol", "udp"),
+                                type=candidate_data.get("type", "host"),
+                                sdpMid=candidate_data.get("sdpMid"),
+                                sdpMLineIndex=candidate_data.get("sdpMLineIndex")
+                            )
+                            
+                            await pc.addIceCandidate(candidate)
+                            print(f"✅ Added valid ICE candidate: {candidate_data.get('candidate', '')[:50]}...")
+                            
+                        except Exception as candidate_error:
+                            print(f"❌ Failed to add ICE candidate: {candidate_error}")
                         
                 except json.JSONDecodeError as e:
                     print(f"JSON decode error: {e}")
@@ -408,12 +449,12 @@ async def websocket_handler(request):
     
     return ws
 
-# HTML client interface (same as before, no changes needed)
+# HTML client interface (same as before)
 HTML_CLIENT = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Real-time S2S Chat</title>
+    <title>Real-time S2S Chat - Fixed</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -511,11 +552,23 @@ HTML_CLIENT = """
         .instructions li {
             margin: 10px 0;
         }
+        .fix-note {
+            background: rgba(76, 175, 80, 0.2);
+            border-left: 4px solid #4CAF50;
+            padding: 15px;
+            margin: 20px 0;
+            border-radius: 5px;
+        }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>🎤 Real-time S2S AI Chat</h1>
+        <h1>🎤 Real-time S2S AI Chat - Fixed</h1>
+        
+        <div class="fix-note">
+            <strong>✅ Fixed:</strong> Empty ICE candidate validation errors resolved. 
+            End-of-candidates markers are now properly filtered.
+        </div>
         
         <div class="controls">
             <button id="startBtn" class="start-btn">Start Conversation</button>
@@ -611,7 +664,10 @@ HTML_CLIENT = """
         async function setupWebRTC() {
             try {
                 peerConnection = new RTCPeerConnection({
-                    iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+                    iceServers: [
+                        { urls: 'stun:stun.l.google.com:19302' },
+                        { urls: 'stun:stun1.l.google.com:19302' }
+                    ]
                 });
                 
                 // Add local stream
@@ -625,13 +681,19 @@ HTML_CLIENT = """
                     playAudio(remoteStream);
                 };
                 
-                // Handle ICE candidates
+                // FIXED: Handle ICE candidates with proper empty candidate filtering
                 peerConnection.onicecandidate = (event) => {
                     if (event.candidate && websocket.readyState === WebSocket.OPEN) {
-                        websocket.send(JSON.stringify({
-                            type: 'ice-candidate',
-                            candidate: event.candidate
-                        }));
+                        // Only send non-empty candidates
+                        if (event.candidate.candidate && event.candidate.candidate.trim() !== '') {
+                            websocket.send(JSON.stringify({
+                                type: 'ice-candidate',
+                                candidate: event.candidate
+                            }));
+                            console.log('✅ Sent ICE candidate:', event.candidate.candidate.substring(0, 50) + '...');
+                        } else {
+                            console.log('⚠️ Ignoring empty candidate (end-of-candidates)');
+                        }
                     }
                 };
                 
@@ -664,7 +726,13 @@ HTML_CLIENT = """
                         sdp: message.sdp
                     }));
                 } else if (message.type === 'ice-candidate') {
-                    await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
+                    // Client-side also filters empty candidates
+                    if (message.candidate && message.candidate.candidate && message.candidate.candidate.trim() !== '') {
+                        await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
+                        console.log('✅ Added ICE candidate from server');
+                    } else {
+                        console.log('⚠️ Ignoring empty candidate from server');
+                    }
                 }
             } catch (error) {
                 console.error('Error handling signaling message:', error);
