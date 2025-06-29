@@ -7,6 +7,8 @@ import tempfile
 import torchaudio
 import websockets
 import threading
+import ssl
+import os
 from aiohttp import web, web_runner, web_ws
 from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
 from aiortc.contrib.media import MediaRecorder, MediaRelay
@@ -314,63 +316,60 @@ class WebRTCConnection:
                 print(f"Error handling audio track: {e}")
                 break
 
-# WebSocket server for signaling
-class SignalingServer:
-    def __init__(self):
-        self.connections = set()
-        self.webrtc_connections = {}
+# WebSocket server for signaling using aiohttp
+async def websocket_handler(request):
+    """Handle WebSocket connections using aiohttp"""
+    ws = web.WebSocketResponse()
+    await ws.prepare(request)
     
-    async def handle_websocket(self, websocket, path):
-        """Handle WebSocket connections for signaling"""
-        self.connections.add(websocket)
-        connection_id = id(websocket)
-        self.webrtc_connections[connection_id] = WebRTCConnection()
-        
-        try:
-            async for message in websocket:
-                await self.handle_message(websocket, message, connection_id)
-        except websockets.exceptions.ConnectionClosed:
-            pass
-        finally:
-            self.connections.discard(websocket)
-            if connection_id in self.webrtc_connections:
-                await self.webrtc_connections[connection_id].pc.close()
-                del self.webrtc_connections[connection_id]
+    connection_id = id(ws)
+    webrtc_connection = WebRTCConnection()
     
-    async def handle_message(self, websocket, message, connection_id):
-        """Handle signaling messages"""
-        try:
-            data = json.loads(message)
-            pc = self.webrtc_connections[connection_id].pc
-            
-            if data["type"] == "offer":
-                # Handle WebRTC offer
-                await pc.setRemoteDescription(RTCSessionDescription(
-                    sdp=data["sdp"], type=data["type"]
-                ))
+    try:
+        async for msg in ws:
+            if msg.type == web.WSMessageType.TEXT:
+                try:
+                    data = json.loads(msg.data)
+                    pc = webrtc_connection.pc
+                    
+                    if data["type"] == "offer":
+                        # Handle WebRTC offer
+                        await pc.setRemoteDescription(RTCSessionDescription(
+                            sdp=data["sdp"], type=data["type"]
+                        ))
+                        
+                        # Add audio track
+                        pc.addTrack(webrtc_connection.audio_track)
+                        
+                        # Create answer
+                        answer = await pc.createAnswer()
+                        await pc.setLocalDescription(answer)
+                        
+                        await ws.send_str(json.dumps({
+                            "type": "answer",
+                            "sdp": pc.localDescription.sdp
+                        }))
+                        
+                    elif data["type"] == "ice-candidate":
+                        # Handle ICE candidate
+                        candidate = data["candidate"]
+                        await pc.addIceCandidate(candidate)
+                        
+                except Exception as e:
+                    print(f"Error handling WebSocket message: {e}")
+                    
+            elif msg.type == web.WSMessageType.ERROR:
+                print(f'WebSocket error: {ws.exception()}')
+                break
                 
-                # Add audio track
-                audio_track = self.webrtc_connections[connection_id].audio_track
-                pc.addTrack(audio_track)
-                
-                # Create answer
-                answer = await pc.createAnswer()
-                await pc.setLocalDescription(answer)
-                
-                await websocket.send(json.dumps({
-                    "type": "answer",
-                    "sdp": pc.localDescription.sdp
-                }))
-                
-            elif data["type"] == "ice-candidate":
-                # Handle ICE candidate
-                candidate = data["candidate"]
-                await pc.addIceCandidate(candidate)
-                
-        except Exception as e:
-            print(f"Error handling message: {e}")
+    except Exception as e:
+        print(f"WebSocket handler error: {e}")
+    finally:
+        await webrtc_connection.pc.close()
+    
+    return ws
 
-# HTML client interface
+# HTML client interface with HTTPS/WSS support
 HTML_CLIENT = """
 <!DOCTYPE html>
 <html>
@@ -517,6 +516,13 @@ HTML_CLIENT = """
         startBtn.addEventListener('click', startConversation);
         stopBtn.addEventListener('click', stopConversation);
         
+        // Determine WebSocket URL based on current protocol
+        function getWebSocketUrl() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const host = window.location.host;
+            return `${protocol}//${host}/ws`;
+        }
+        
         async function startConversation() {
             try {
                 updateStatus('Connecting...', '');
@@ -534,8 +540,10 @@ HTML_CLIENT = """
                 // Setup audio visualization
                 setupAudioVisualization();
                 
-                // Connect WebSocket
-                websocket = new WebSocket(`ws://${window.location.hostname}:8765`);
+                // Connect WebSocket using the same host and protocol
+                const wsUrl = getWebSocketUrl();
+                console.log('Connecting to:', wsUrl);
+                websocket = new WebSocket(wsUrl);
                 
                 websocket.onopen = () => {
                     updateStatus('Connected - Setting up audio...', 'connected');
@@ -546,6 +554,10 @@ HTML_CLIENT = """
                 websocket.onerror = (error) => {
                     updateStatus('Connection error', 'error');
                     console.error('WebSocket error:', error);
+                };
+                
+                websocket.onclose = () => {
+                    updateStatus('Connection closed', 'error');
                 };
                 
                 startBtn.disabled = true;
@@ -576,7 +588,7 @@ HTML_CLIENT = """
                 
                 // Handle ICE candidates
                 peerConnection.onicecandidate = (event) => {
-                    if (event.candidate) {
+                    if (event.candidate && websocket.readyState === WebSocket.OPEN) {
                         websocket.send(JSON.stringify({
                             type: 'ice-candidate',
                             candidate: event.candidate
@@ -588,10 +600,12 @@ HTML_CLIENT = """
                 const offer = await peerConnection.createOffer();
                 await peerConnection.setLocalDescription(offer);
                 
-                websocket.send(JSON.stringify({
-                    type: 'offer',
-                    sdp: offer.sdp
-                }));
+                if (websocket.readyState === WebSocket.OPEN) {
+                    websocket.send(JSON.stringify({
+                        type: 'offer',
+                        sdp: offer.sdp
+                    }));
+                }
                 
                 updateStatus('Ready - Start speaking!', 'connected');
                 
@@ -602,15 +616,19 @@ HTML_CLIENT = """
         }
         
         async function handleSignalingMessage(event) {
-            const message = JSON.parse(event.data);
-            
-            if (message.type === 'answer') {
-                await peerConnection.setRemoteDescription(new RTCSessionDescription({
-                    type: 'answer',
-                    sdp: message.sdp
-                }));
-            } else if (message.type === 'ice-candidate') {
-                await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
+            try {
+                const message = JSON.parse(event.data);
+                
+                if (message.type === 'answer') {
+                    await peerConnection.setRemoteDescription(new RTCSessionDescription({
+                        type: 'answer',
+                        sdp: message.sdp
+                    }));
+                } else if (message.type === 'ice-candidate') {
+                    await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
+                }
+            } catch (error) {
+                console.error('Error handling signaling message:', error);
             }
         }
         
@@ -695,6 +713,12 @@ async def handle_http(request):
     """Serve the HTML client"""
     return web.Response(text=HTML_CLIENT, content_type='text/html')
 
+async def handle_favicon(request):
+    """Handle favicon request"""
+    # Return a simple 1x1 transparent PNG
+    favicon_data = b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xdb\x00\x00\x00\x00IEND\xaeB`\x82'
+    return web.Response(body=favicon_data, content_type='image/png')
+
 async def main():
     """Main function"""
     print("🚀 Initializing Real-time S2S Agent...")
@@ -702,31 +726,25 @@ async def main():
     # Initialize models
     initialize_models()
     
-    print("🎉 Starting servers...")
+    print("🎉 Starting server...")
     
-    # Create signaling server
-    signaling_server = SignalingServer()
-    
-    # Start WebSocket server for signaling
-    websocket_server = await websockets.serve(
-        signaling_server.handle_websocket,
-        "0.0.0.0",
-        8765
-    )
-    
-    # Start HTTP server for client
+    # Create aiohttp application
     app = web.Application()
     app.router.add_get('/', handle_http)
+    app.router.add_get('/ws', websocket_handler)
+    app.router.add_get('/favicon.ico', handle_favicon)
     
+    # Setup and start the server
     runner = web_runner.AppRunner(app)
     await runner.setup()
     
+    # Use port 7860 as expected by RunPod
     site = web.TCPSite(runner, '0.0.0.0', 7860)
     await site.start()
     
-    print("✅ Servers started!")
-    print(f"🌐 Open http://localhost:7860 in your browser")
-    print(f"🔌 WebSocket server running on ws://localhost:8765")
+    print("✅ Server started!")
+    print(f"🌐 Server running on port 7860")
+    print(f"🔌 WebSocket endpoint available at /ws")
     print("Press Ctrl+C to stop...")
     
     try:
@@ -734,8 +752,6 @@ async def main():
     except KeyboardInterrupt:
         print("\n🛑 Shutting down...")
     finally:
-        websocket_server.close()
-        await websocket_server.wait_closed()
         await runner.cleanup()
 
 if __name__ == "__main__":
