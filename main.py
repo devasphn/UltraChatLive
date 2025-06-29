@@ -1,8 +1,6 @@
 import torch
 import gc
 import numpy as np
-import torchaudio
-import tempfile
 from typing import Iterator, Tuple
 
 from fastrtc import Stream, ReplyOnPause, AlgoOptions, SileroVadOptions
@@ -11,8 +9,7 @@ from chatterbox.tts import ChatterboxTTS
 
 print("🚀 Loading UltraChat Real-Time S2S Agent...")
 
-# 1. Initialize models
-print("📡 Loading Ultravox pipeline...")
+# 1. Load Ultravox pipeline
 uv_pipe = pipeline(
     model="fixie-ai/ultravox-v0_4",
     trust_remote_code=True,
@@ -21,7 +18,7 @@ uv_pipe = pipeline(
 )
 print("✅ Ultravox loaded successfully")
 
-# 2. TTS class (same as before)
+# 2. Chatterbox TTS class
 class OptimizedTTS:
     def __init__(self):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -37,51 +34,41 @@ class OptimizedTTS:
         self.load()
         if len(text) > 200:
             text = text[:200] + "..."
-        
         wav = self.model.generate(text)
-        
         if isinstance(wav, torch.Tensor):
             wav_np = wav.cpu().numpy()
         else:
             wav_np = np.array(wav)
-            
         if wav_np.ndim == 1:
             wav_np = wav_np.reshape(1, -1)
         elif wav_np.ndim == 2 and wav_np.shape[0] > wav_np.shape[1]:
             wav_np = wav_np.T
-            
         if self.device == "cuda":
             torch.cuda.empty_cache()
             gc.collect()
-            
         return (self.model.sr, wav_np)
 
 tts = OptimizedTTS()
 
-# 3. S2S handler
+# 3. Real-time S2S handler
 def s2s_handler(audio: Tuple[int, np.ndarray]) -> Iterator[Tuple[int, np.ndarray]]:
     sample_rate, audio_data = audio
     print(f"🎤 Processing audio: {audio_data.shape}, SR: {sample_rate}")
-    
     try:
         if audio_data.ndim == 2:
             audio_data = audio_data.mean(axis=0)
-            
         if sample_rate != 16000:
             import librosa
             audio_data = librosa.resample(audio_data, orig_sr=sample_rate, target_sr=16000)
             sample_rate = 16000
-        
         turns = [
             {"role": "system", "content": "You are a helpful voice assistant. Give very brief responses under 30 words."},
         ]
-        
         result = uv_pipe({
             'audio': audio_data, 
             'turns': turns, 
             'sampling_rate': sample_rate
         }, max_new_tokens=50)
-        
         response_text = result
         if isinstance(result, list) and len(result) > 0:
             if isinstance(result[0], dict) and "generated_text" in result[0]:
@@ -92,17 +79,12 @@ def s2s_handler(audio: Tuple[int, np.ndarray]) -> Iterator[Tuple[int, np.ndarray
             response_text = result["generated_text"]
         else:
             response_text = str(result)
-            
         print(f"💬 Generated response: {response_text}")
-        
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
             gc.collect()
-        
         tts_sample_rate, tts_audio = tts.synthesize(response_text)
-        
         chunk_size = tts_sample_rate // 5
-        
         if tts_audio.ndim == 2:
             total_samples = tts_audio.shape[1]
             for i in range(0, total_samples, chunk_size):
@@ -114,13 +96,12 @@ def s2s_handler(audio: Tuple[int, np.ndarray]) -> Iterator[Tuple[int, np.ndarray
                 chunk = tts_audio[i:i+chunk_size]
                 if len(chunk) > 0:
                     yield (tts_sample_rate, chunk.reshape(1, -1))
-                    
     except Exception as e:
         print(f"❌ Error in s2s_handler: {e}")
         silence = np.zeros((1, 4000))
         yield (16000, silence)
 
-# 4. Configure FastRTC Stream
+# 4. FastRTC Stream with built-in UI
 stream = Stream(
     handler=ReplyOnPause(
         s2s_handler,
@@ -143,10 +124,8 @@ stream = Stream(
     mode="send-receive"
 )
 
-# 5. LAUNCH WITH BUILT-IN UI (Key Change)
 if __name__ == "__main__":
     print("🚀 Launching UltraChat with FastRTC built-in UI...")
-    # Use the built-in UI instead of custom FastAPI
     stream.ui.launch(
         server_name="0.0.0.0",
         server_port=7860,
