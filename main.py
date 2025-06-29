@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 import warnings
 import torch.hub
 import collections
+import time
 
 warnings.filterwarnings("ignore")
 logging.basicConfig(level=logging.INFO)
@@ -75,9 +76,9 @@ class SileroVAD:
                 audio_tensor, 
                 self.model,
                 sampling_rate=sample_rate,
-                threshold=0.5,
-                min_speech_duration_ms=250,
-                min_silence_duration_ms=100
+                threshold=0.3,  # Lower threshold for better detection
+                min_speech_duration_ms=200,  # Shorter minimum
+                min_silence_duration_ms=300   # Shorter silence
             )
             
             return len(speech_timestamps) > 0
@@ -121,15 +122,14 @@ def initialize_models():
         exit(1)
 
 class AudioBuffer:
-    """Ring buffer for audio data with VAD integration"""
-    def __init__(self, max_duration=10.0, sample_rate=16000):
+    """FIXED: Simplified audio buffer with working VAD logic"""
+    def __init__(self, max_duration=5.0, sample_rate=16000):
         self.sample_rate = sample_rate
         self.max_samples = int(max_duration * sample_rate)
         self.buffer = collections.deque(maxlen=self.max_samples)
-        self.speech_detected = False
-        self.silence_counter = 0
-        self.min_speech_samples = int(0.5 * sample_rate)  # 0.5 seconds
-        self.max_silence_samples = int(1.0 * sample_rate)  # 1 second
+        self.last_process_time = time.time()
+        self.min_speech_samples = int(1.0 * sample_rate)  # 1 second minimum
+        self.process_interval = 2.0  # Process every 2 seconds
         
     def add_audio(self, audio_data):
         """Add audio data to buffer"""
@@ -138,6 +138,8 @@ class AudioBuffer:
         
         for sample in audio_data:
             self.buffer.append(sample)
+        
+        print(f"🎵 Buffer size: {len(self.buffer)} samples")
     
     def get_audio_array(self):
         """Get current audio as numpy array"""
@@ -146,31 +148,31 @@ class AudioBuffer:
         return np.array(list(self.buffer), dtype=np.float32)
     
     def should_process(self):
-        """Check if we should process current audio"""
-        if len(self.buffer) < self.min_speech_samples:
-            return False
+        """FIXED: Simplified processing logic"""
+        current_time = time.time()
+        
+        # Check if we have minimum audio and enough time has passed
+        has_enough_audio = len(self.buffer) >= self.min_speech_samples
+        enough_time_passed = (current_time - self.last_process_time) >= self.process_interval
+        
+        if has_enough_audio and enough_time_passed:
+            audio_array = self.get_audio_array()
             
-        audio_array = self.get_audio_array()
+            # Use VAD to detect speech
+            has_speech = vad_model.detect_speech(audio_array, self.sample_rate)
+            
+            print(f"🔍 VAD Check: {len(audio_array)} samples, Speech detected: {has_speech}")
+            
+            if has_speech:
+                self.last_process_time = current_time
+                return True
         
-        # Use VAD to detect speech
-        has_speech = vad_model.detect_speech(audio_array, self.sample_rate)
-        
-        if has_speech:
-            self.speech_detected = True
-            self.silence_counter = 0
-            return False  # Continue collecting
-        else:
-            if self.speech_detected:
-                self.silence_counter += len(audio_array) // 1000  # Rough increment
-                if self.silence_counter >= self.max_silence_samples // 1000:
-                    return True  # Process now
-            return False
+        return False
     
     def reset(self):
         """Reset buffer state"""
         self.buffer.clear()
-        self.speech_detected = False
-        self.silence_counter = 0
+        print("🔄 Buffer reset")
 
 class OptimizedTTS:
     def __init__(self):
@@ -179,9 +181,10 @@ class OptimizedTTS:
     def synthesize(self, text: str) -> np.ndarray:
         """Optimized TTS synthesis returning numpy array"""
         if not text.strip():
-            # Return silence for empty text
-            return np.zeros(1600, dtype=np.float32)  # 0.1 seconds
+            return np.zeros(1600, dtype=np.float32)
 
+        print(f"🎤 Synthesizing: '{text[:50]}...'")
+        
         # Generate audio with optimizations
         with torch.inference_mode():
             wav = tts_model.generate(text)
@@ -192,10 +195,12 @@ class OptimizedTTS:
             wav = wav.unsqueeze(0)
             
         # Convert to numpy array
-        return wav.cpu().numpy().flatten().astype(np.float32)
+        result = wav.cpu().numpy().flatten().astype(np.float32)
+        print(f"✅ TTS generated {len(result)} samples")
+        return result
 
 class AudioStreamTrack(MediaStreamTrack):
-    """Custom audio track for WebRTC with proper timestamp handling"""
+    """FIXED: Audio track with working response queue"""
     kind = "audio"
     
     def __init__(self):
@@ -203,29 +208,44 @@ class AudioStreamTrack(MediaStreamTrack):
         self.buffer = AudioBuffer()
         self.tts = OptimizedTTS()
         self._response_queue = asyncio.Queue()
+        self._current_response = None
+        self._response_position = 0
         # Initialize timestamp tracking
         self._timestamp = 0
-        self._time_base = fractions.Fraction(1, 16000)  # 16kHz sample rate
+        self._time_base = fractions.Fraction(1, 16000)
         
     async def recv(self):
-        """Receive audio frame from WebRTC with proper timestamp handling"""
+        """FIXED: Audio frame generation with proper response handling"""
         frame_samples = 1600  # 0.1 seconds at 16kHz
         
         # Check if we have response audio to send
-        try:
-            response_audio = self._response_queue.get_nowait()
-            frame = response_audio[:frame_samples]
+        if self._current_response is None or self._response_position >= len(self._current_response):
+            try:
+                self._current_response = await asyncio.wait_for(
+                    self._response_queue.get(), timeout=0.001
+                )
+                self._response_position = 0
+                print(f"🔊 Starting new response playback: {len(self._current_response)} samples")
+            except asyncio.TimeoutError:
+                # No response available, send silence
+                frame = np.zeros(frame_samples, dtype=np.float32)
+        
+        if self._current_response is not None:
+            # Extract frame from current response
+            end_pos = min(self._response_position + frame_samples, len(self._current_response))
+            frame = self._current_response[self._response_position:end_pos]
+            self._response_position = end_pos
+            
+            # Pad if needed
             if len(frame) < frame_samples:
-                # Pad with silence if needed
                 frame = np.pad(frame, (0, frame_samples - len(frame)), 'constant')
-        except asyncio.QueueEmpty:
-            # Create silence frame
+        else:
             frame = np.zeros(frame_samples, dtype=np.float32)
         
         # Create AudioFrame using PyAV
         audio_frame = av.AudioFrame.from_ndarray(
             frame.reshape(1, -1), 
-            format="flt",  # 32-bit float
+            format="flt",
             layout="mono"
         )
         
@@ -247,6 +267,7 @@ class AudioStreamTrack(MediaStreamTrack):
             # Get audio for processing
             audio_array = self.buffer.get_audio_array()
             if len(audio_array) > 0:
+                print(f"🎯 Processing speech: {len(audio_array)} samples")
                 # Process in background
                 asyncio.create_task(self._process_speech(audio_array))
             self.buffer.reset()
@@ -254,24 +275,30 @@ class AudioStreamTrack(MediaStreamTrack):
     async def _process_speech(self, audio_array):
         """Process speech and generate response"""
         try:
+            print("🧠 Generating AI response...")
             # Generate response
             response_text = await self._generate_response(audio_array)
             if response_text.strip():
+                print(f"💬 AI Response: '{response_text}'")
                 # Generate TTS
                 response_audio = self.tts.synthesize(response_text)
                 # Queue response audio for sending
                 await self._response_queue.put(response_audio)
+            else:
+                print("⚠️ Empty response generated")
                 
         except Exception as e:
-            print(f"Error processing speech: {e}")
+            print(f"❌ Error processing speech: {e}")
     
     async def _generate_response(self, audio_array):
         """Generate response using Ultravox"""
         try:
             turns = [{
                 "role": "system", 
-                "content": "You are a helpful voice assistant. Be concise and natural."
+                "content": "You are a helpful voice assistant. Give brief, natural responses under 20 words."
             }]
+            
+            print(f"🤖 Calling Ultravox with {len(audio_array)} audio samples...")
             
             with torch.inference_mode():
                 result = uv_pipe({
@@ -279,7 +306,7 @@ class AudioStreamTrack(MediaStreamTrack):
                     'turns': turns,
                     'sampling_rate': 16000
                 }, 
-                max_new_tokens=64,
+                max_new_tokens=32,  # Shorter for faster response
                 do_sample=True,
                 temperature=0.7,
                 top_p=0.9,
@@ -297,11 +324,12 @@ class AudioStreamTrack(MediaStreamTrack):
                 response_text = result["generated_text"]
             else:
                 response_text = str(result)
-                
+            
+            print(f"✅ Ultravox response: '{response_text}'")
             return response_text.strip()
             
         except Exception as e:
-            print(f"Error generating response: {e}")
+            print(f"❌ Error generating response: {e}")
             return "I'm sorry, I couldn't process that."
 
 class WebRTCConnection:
@@ -323,6 +351,7 @@ class WebRTCConnection:
     
     async def _handle_audio_track(self, track):
         """Handle incoming audio track with proper error handling"""
+        print("🎧 Starting audio track handler...")
         try:
             while True:
                 try:
@@ -339,39 +368,29 @@ class WebRTCConnection:
             print(f"Error handling audio track: {e}")
 
 def is_valid_ice_candidate(candidate_data):
-    """
-    CRITICAL FIX: Filter out empty candidates (end-of-candidates markers)
-    Returns True if candidate is valid, False if it should be ignored
-    """
+    """Filter out empty candidates (end-of-candidates markers)"""
     if not candidate_data:
         return False
     
-    # Check if candidate string is empty (end-of-candidates)
     candidate_string = candidate_data.get("candidate", "")
     if not candidate_string or candidate_string.strip() == "":
-        print("Ignoring empty candidate (end-of-candidates marker)")
         return False
     
-    # Additional validation for malformed candidates
     try:
         parts = candidate_string.split()
-        if len(parts) < 6:  # Basic ICE candidate should have at least 6 parts
-            print(f"Ignoring malformed candidate: {candidate_string}")
+        if len(parts) < 6:
             return False
         
-        # Extract IP address (should be at index 4)
         ip_address = parts[4]
         if not ip_address or ip_address == "":
-            print(f"Ignoring candidate with empty IP: {candidate_string}")
             return False
             
         return True
         
     except Exception as e:
-        print(f"Error validating candidate: {e}")
         return False
 
-# FIXED: WebSocket handler with empty candidate filtering
+# WebSocket handler with proper ICE candidate filtering
 async def websocket_handler(request):
     """Handle WebSocket connections using aiohttp with proper ICE candidate filtering"""
     ws = web.WebSocketResponse()
@@ -379,6 +398,8 @@ async def websocket_handler(request):
     
     connection_id = id(ws)
     webrtc_connection = WebRTCConnection()
+    
+    print(f"🔌 New WebSocket connection: {connection_id}")
     
     try:
         async for msg in ws:
@@ -388,6 +409,7 @@ async def websocket_handler(request):
                     pc = webrtc_connection.pc
                     
                     if data["type"] == "offer":
+                        print("📨 Received WebRTC offer")
                         # Handle WebRTC offer
                         await pc.setRemoteDescription(RTCSessionDescription(
                             sdp=data["sdp"], type=data["type"]
@@ -405,15 +427,14 @@ async def websocket_handler(request):
                             "sdp": pc.localDescription.sdp
                         }))
                         
+                        print("📤 Sent WebRTC answer")
+                        
                     elif data["type"] == "ice-candidate":
-                        # CRITICAL FIX: Validate candidate before processing
                         candidate_data = data["candidate"]
                         
                         if not is_valid_ice_candidate(candidate_data):
-                            # Skip empty or invalid candidates
                             continue
                         
-                        # Create RTCIceCandidate from the received data
                         try:
                             candidate = RTCIceCandidate(
                                 component=candidate_data.get("component", 1),
@@ -428,7 +449,6 @@ async def websocket_handler(request):
                             )
                             
                             await pc.addIceCandidate(candidate)
-                            print(f"✅ Added valid ICE candidate: {candidate_data.get('candidate', '')[:50]}...")
                             
                         except Exception as candidate_error:
                             print(f"❌ Failed to add ICE candidate: {candidate_error}")
@@ -446,15 +466,16 @@ async def websocket_handler(request):
         print(f"WebSocket handler error: {e}")
     finally:
         await webrtc_connection.pc.close()
+        print(f"🔌 Closed WebSocket connection: {connection_id}")
     
     return ws
 
-# HTML client interface (same as before)
+# HTML client interface
 HTML_CLIENT = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>Real-time S2S Chat - Fixed</title>
+    <title>UltraChat S2S - Working Version</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -563,11 +584,10 @@ HTML_CLIENT = """
 </head>
 <body>
     <div class="container">
-        <h1>🎤 Real-time S2S AI Chat - Fixed</h1>
+        <h1>🎤 UltraChat S2S - Working Version</h1>
         
         <div class="fix-note">
-            <strong>✅ Fixed:</strong> Empty ICE candidate validation errors resolved. 
-            End-of-candidates markers are now properly filtered.
+            <strong>✅ Fixed:</strong> Audio processing pipeline corrected. AI responses now working properly.
         </div>
         
         <div class="controls">
@@ -586,9 +606,9 @@ HTML_CLIENT = """
             <ul>
                 <li>Click "Start Conversation" to begin</li>
                 <li>Allow microphone access when prompted</li>
-                <li>Speak naturally - the AI will detect when you're done speaking</li>
-                <li>The AI will respond automatically with voice</li>
-                <li>Click "Stop Conversation" to end the session</li>
+                <li>Speak clearly for 2-3 seconds</li>
+                <li>Wait for AI response (processing takes 5-10 seconds)</li>
+                <li>AI will respond with voice automatically</li>
             </ul>
         </div>
     </div>
@@ -608,7 +628,6 @@ HTML_CLIENT = """
         startBtn.addEventListener('click', startConversation);
         stopBtn.addEventListener('click', stopConversation);
         
-        // Determine WebSocket URL based on current protocol
         function getWebSocketUrl() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const host = window.location.host;
@@ -619,7 +638,6 @@ HTML_CLIENT = """
             try {
                 updateStatus('Connecting...', '');
                 
-                // Get user media
                 localStream = await navigator.mediaDevices.getUserMedia({
                     audio: {
                         echoCancellation: true,
@@ -629,10 +647,8 @@ HTML_CLIENT = """
                     }
                 });
                 
-                // Setup audio visualization
                 setupAudioVisualization();
                 
-                // Connect WebSocket using the same host and protocol
                 const wsUrl = getWebSocketUrl();
                 console.log('Connecting to:', wsUrl);
                 websocket = new WebSocket(wsUrl);
@@ -670,34 +686,26 @@ HTML_CLIENT = """
                     ]
                 });
                 
-                // Add local stream
                 localStream.getTracks().forEach(track => {
                     peerConnection.addTrack(track, localStream);
                 });
                 
-                // Handle incoming audio
                 peerConnection.ontrack = (event) => {
                     const [remoteStream] = event.streams;
                     playAudio(remoteStream);
                 };
                 
-                // FIXED: Handle ICE candidates with proper empty candidate filtering
                 peerConnection.onicecandidate = (event) => {
                     if (event.candidate && websocket.readyState === WebSocket.OPEN) {
-                        // Only send non-empty candidates
                         if (event.candidate.candidate && event.candidate.candidate.trim() !== '') {
                             websocket.send(JSON.stringify({
                                 type: 'ice-candidate',
                                 candidate: event.candidate
                             }));
-                            console.log('✅ Sent ICE candidate:', event.candidate.candidate.substring(0, 50) + '...');
-                        } else {
-                            console.log('⚠️ Ignoring empty candidate (end-of-candidates)');
                         }
                     }
                 };
                 
-                // Create offer
                 const offer = await peerConnection.createOffer();
                 await peerConnection.setLocalDescription(offer);
                 
@@ -726,12 +734,8 @@ HTML_CLIENT = """
                         sdp: message.sdp
                     }));
                 } else if (message.type === 'ice-candidate') {
-                    // Client-side also filters empty candidates
                     if (message.candidate && message.candidate.candidate && message.candidate.candidate.trim() !== '') {
                         await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
-                        console.log('✅ Added ICE candidate from server');
-                    } else {
-                        console.log('⚠️ Ignoring empty candidate from server');
                     }
                 }
             } catch (error) {
@@ -822,7 +826,6 @@ async def handle_http(request):
 
 async def handle_favicon(request):
     """Handle favicon request"""
-    # Return a simple 1x1 transparent PNG
     favicon_data = b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89\x00\x00\x00\nIDATx\x9cc\x00\x01\x00\x00\x05\x00\x01\r\n-\xdb\x00\x00\x00\x00IEND\xaeB`\x82'
     return web.Response(body=favicon_data, content_type='image/png')
 
