@@ -685,44 +685,54 @@ HTML_CLIENT = """
                         { urls: 'stun:stun1.l.google.com:19302' }
                     ]
                 });
-                
+        
                 localStream.getTracks().forEach(track => {
                     peerConnection.addTrack(track, localStream);
                 });
-                
+        
                 peerConnection.ontrack = (event) => {
                     const [remoteStream] = event.streams;
                     playAudio(remoteStream);
                 };
-                
+        
+                // FIXED: Proper ICE candidate filtering
                 peerConnection.onicecandidate = (event) => {
                     if (event.candidate && websocket.readyState === WebSocket.OPEN) {
-                        if (event.candidate.candidate && event.candidate.candidate.trim() !== '') {
+                        // Check if candidate is valid (not empty or null)
+                        const candidateStr = event.candidate.candidate;
+                        if (candidateStr && candidateStr.trim() !== '' && candidateStr !== 'null') {
                             websocket.send(JSON.stringify({
                                 type: 'ice-candidate',
                                 candidate: event.candidate
                             }));
+                            console.log('✅ Sent valid ICE candidate');
+                        } else {
+                            console.log('⚠️ Filtered empty ICE candidate');
                         }
+                    } else if (event.candidate === null) {
+                        // End of candidates - this is normal, don't send anything
+                        console.log('🏁 ICE candidate gathering complete');
                     }
                 };
-                
+        
                 const offer = await peerConnection.createOffer();
                 await peerConnection.setLocalDescription(offer);
-                
+        
                 if (websocket.readyState === WebSocket.OPEN) {
                     websocket.send(JSON.stringify({
                         type: 'offer',
                         sdp: offer.sdp
                     }));
                 }
-                
+        
                 updateStatus('Ready - Start speaking!', 'connected');
-                
+        
             } catch (error) {
                 updateStatus('WebRTC setup error: ' + error.message, 'error');
                 console.error('WebRTC error:', error);
             }
         }
+
         
         async function handleSignalingMessage(event) {
             try {
