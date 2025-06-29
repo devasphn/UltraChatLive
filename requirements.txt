@@ -1,0 +1,21 @@
+torch==2.6.0
+torchvision==0.21.0
+torchaudio==2.6.0
+transformers
+librosa
+chatterbox-tts
+numpy
+scipy
+huggingface-hub
+peft
+accelerate
+
+# Real-time streaming components
+fastrtc[vad,stt,tts]
+gradio
+uvicorn[standard]
+fastapi
+websockets
+silero-vad
+pyaudio
+soundfile
