@@ -3,7 +3,7 @@ cd workspace
 python3 -m venv venv
 source venv/bin/activate
 
-git clone https://github.com/devasphn/UltraChat/ 
+git clone https://github.com/devasphn/UltraChatLive/ 
 
 cd UltraChat
 
