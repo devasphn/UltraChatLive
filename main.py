@@ -317,7 +317,8 @@ class WebRTCConnection:
                 print(f"Error handling audio track: {e}")
                 break
 
-# WebSocket server for signaling using aiohttp
+# Replace your websocket_handler function with this corrected version:
+
 async def websocket_handler(request):
     """Handle WebSocket connections using aiohttp"""
     ws = web.WebSocketResponse()
@@ -328,7 +329,7 @@ async def websocket_handler(request):
     
     try:
         async for msg in ws:
-            if msg.type == WSMsgType.TEXT:  # Fixed: Use WSMsgType instead of web.WSMessageType
+            if msg.type == WSMsgType.TEXT:
                 try:
                     data = json.loads(msg.data)
                     pc = webrtc_connection.pc
@@ -352,21 +353,52 @@ async def websocket_handler(request):
                         }))
                         
                     elif data["type"] == "ice-candidate":
-                        # Handle ICE candidate
+                        # Handle ICE candidate - FIXED VERSION
                         candidate_data = data["candidate"]
+                        
+                        # Create RTCIceCandidate with correct parameters
                         candidate = RTCIceCandidate(
-                            candidate=candidate_data.get("candidate"),
+                            component=candidate_data.get("component", 1),
+                            foundation=candidate_data.get("foundation", ""),
+                            ip=candidate_data.get("address", ""),
+                            port=candidate_data.get("port", 0),
+                            priority=candidate_data.get("priority", 0),
+                            protocol=candidate_data.get("protocol", "udp"),
+                            type=candidate_data.get("type", "host"),
                             sdpMid=candidate_data.get("sdpMid"),
                             sdpMLineIndex=candidate_data.get("sdpMLineIndex")
                         )
+                        
+                        # Alternative approach - parse the candidate string if available
+                        if "candidate" in candidate_data:
+                            # Parse the candidate string format
+                            candidate_str = candidate_data["candidate"]
+                            parts = candidate_str.split()
+                            
+                            if len(parts) >= 8:
+                                candidate = RTCIceCandidate(
+                                    component=int(parts[1]),
+                                    foundation=parts[0],
+                                    ip=parts[4],
+                                    port=int(parts[5]),
+                                    priority=int(parts[3]),
+                                    protocol=parts[2],
+                                    type=parts[7],
+                                    sdpMid=candidate_data.get("sdpMid"),
+                                    sdpMLineIndex=candidate_data.get("sdpMLineIndex")
+                                )
+                        
                         await pc.addIceCandidate(candidate)
                         
                 except json.JSONDecodeError as e:
                     print(f"JSON decode error: {e}")
                 except Exception as e:
                     print(f"Error handling WebSocket message: {e}")
+                    # Print more details for debugging
+                    if "ice-candidate" in str(e):
+                        print(f"ICE candidate data: {data.get('candidate', 'No candidate data')}")
                     
-            elif msg.type == WSMsgType.ERROR:  # Fixed: Use WSMsgType
+            elif msg.type == WSMsgType.ERROR:
                 print(f'WebSocket error: {ws.exception()}')
                 break
                 
@@ -376,7 +408,6 @@ async def websocket_handler(request):
         await webrtc_connection.pc.close()
     
     return ws
-
 # HTML client interface with HTTPS/WSS support
 HTML_CLIENT = """
 <!DOCTYPE html>
