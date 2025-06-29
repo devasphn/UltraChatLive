@@ -1,0 +1,22 @@
+cd workspace
+
+python3 -m venv venv
+source venv/bin/activate
+
+git clone https://github.com/devasphn/UltraChat/ 
+
+cd UltraChat
+
+apt-get update && apt-get install -y python3-pip git libsndfile1 ffmpeg
+
+pip install --upgrade pip
+
+pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
+
+pip install transformers librosa chatterbox-tts gradio numpy scipy huggingface-hub peft accelerate
+
+pip install torch-audio-segment silero-vad aiortc websockets aiohttp aiofiles soundfile webrtcvad pyaudio uvloop
+
+apt-get update && apt-get install -y libsox-dev libsndfile1-dev portaudio19-dev
+
+python main.py
