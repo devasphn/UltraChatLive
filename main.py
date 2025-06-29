@@ -9,9 +9,10 @@ import websockets
 import threading
 import ssl
 import os
+import av
 import fractions  # CRITICAL: Missing import for timestamps
 from aiohttp import web, web_runner, WSMsgType
-from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack, RTCIceCandidate, AudioFrame
+from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack, RTCIceCandidate
 from aiortc.contrib.media import MediaRecorder, MediaRelay
 from transformers import pipeline
 from chatterbox.tts import ChatterboxTTS
