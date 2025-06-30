@@ -557,7 +557,7 @@ def is_valid_ice_candidate(candidate_data):
         logger.debug(f"ICE candidate validation error: {e}")
         return False
 
-# WebSocket handler with CRITICAL FIXES for aiortc version compatibility
+# WebSocket handler with CRITICAL FIXES for RTCSessionDescription
 async def websocket_handler(request):
     """Handle WebSocket connections with comprehensive error handling"""
     ws = web.WebSocketResponse(heartbeat=30)
@@ -578,30 +578,16 @@ async def websocket_handler(request):
                     if data["type"] == "offer":
                         logger.info("📨 Received WebRTC offer")
                         
-                        # CRITICAL FIX: Handle aiortc version compatibility issue
-                        # Extract SDP and type as confirmed by search results
+                        # CRITICAL FIX: Proper RTCSessionDescription construction
                         sdp_string = data["sdp"]
                         sdp_type = data["type"]
                         
                         logger.info(f"🔧 Creating RTCSessionDescription with SDP length: {len(sdp_string)}")
                         
                         try:
-                            # CRITICAL FIX: Create a minimal RTCSessionDescription object
-                            # to work around the bundlePolicy issue
-                            class CompatibleRTCSessionDescription:
-                                def __init__(self, sdp, type):
-                                    self.sdp = sdp
-                                    self.type = type
-                                    # Add bundlePolicy to prevent the error
-                                    self.bundlePolicy = "balanced"
-                            
-                            # Try the standard way first
-                            try:
-                                description = RTCSessionDescription(sdp=sdp_string, type=sdp_type)
-                            except Exception as std_error:
-                                logger.warning(f"⚠️ Standard RTCSessionDescription failed: {std_error}")
-                                # Use our compatible version
-                                description = CompatibleRTCSessionDescription(sdp=sdp_string, type=sdp_type)
+                            # FIXED: Use proper aiortc RTCSessionDescription constructor
+                            # According to aiortc docs: RTCSessionDescription(sdp, type)
+                            description = RTCSessionDescription(sdp=sdp_string, type=sdp_type)
                             
                             await pc.setRemoteDescription(description)
                             
@@ -677,7 +663,7 @@ HTML_CLIENT = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>UltraChat S2S - VERSION COMPATIBLE</title>
+    <title>UltraChat S2S - FIXED VERSION</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -789,10 +775,10 @@ HTML_CLIENT = """
 </head>
 <body>
     <div class="container">
-        <h1>🎤 Real-time S2S AI Chat - COMPATIBLE!</h1>
+        <h1>🎤 Real-time S2S AI Chat - FIXED!</h1>
         
         <div class="fix-note">
-            <strong>✅ VERSION COMPATIBLE:</strong> Fixed aiortc bundlePolicy compatibility issue. This version handles all aiortc versions correctly!
+            <strong>✅ BUNDLEPOLICY ERROR FIXED:</strong> Corrected RTCSessionDescription usage and removed the bundlePolicy attribute error. This version properly handles aiortc session descriptions!
         </div>
         
         <div class="controls">
@@ -1109,7 +1095,7 @@ async def handle_favicon(request):
 
 async def main():
     """Main function with enhanced error handling"""
-    print("🚀 UltraChat S2S - VERSION COMPATIBLE - Starting server...")
+    print("🚀 UltraChat S2S - FIXED VERSION - Starting server...")
     
     # Initialize models
     if not initialize_models():
