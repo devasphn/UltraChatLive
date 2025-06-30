@@ -425,20 +425,30 @@ async def websocket_handler(request):
                     
                     elif data["type"] == "ice-candidate" and "candidate" in data:
                         try:
-                            # Use snake_case for Python keywords, taking values from the camelCase JSON
-                            candidate = RTCIceCandidate(
-                                candidate=data.get("candidate"),
-                                sdp_mid=data.get("sdpMid"),
-                                sdp_mline_index=data.get("sdpMLineIndex"),
-                            )
-                            await connection.pc.addIceCandidate(candidate)
-                            logger.debug(f"✅ Added ICE candidate: {data.get('candidate')[:30]}...")
+                            # CRITICAL FIX:
+                            # The RTCIceCandidate constructor expects the candidate string
+                            # as the FIRST POSITIONAL ARGUMENT, not a keyword argument.
+                            # The other parameters (sdp_mid, sdp_mline_index) are keyword arguments.
+                            candidate_string = data.get("candidate")
+                            sdp_mid = data.get("sdpMid")
+                            sdp_mline_index = data.get("sdpMLineIndex")
+
+                            if candidate_string and sdp_mid is not None and sdp_mline_index is not None:
+                                candidate = RTCIceCandidate(
+                                    candidate_string,  # <--- THIS IS THE KEY FIX
+                                    sdp_mid=sdp_mid,
+                                    sdp_mline_index=sdp_mline_index,
+                                )
+                                await connection.pc.addIceCandidate(candidate)
+                                logger.debug(f"✅ Added ICE candidate: {candidate_string[:30]}...")
+                            else:
+                                logger.warning(f"Received incomplete ICE candidate data: {data}")
+
                         except Exception as e:
                             logger.error(f"❌ Error adding ICE candidate. Data: {data}. Error: {e}", exc_info=True)
                 except json.JSONDecodeError:
                     logger.error("❌ Received invalid JSON message.")
                 except Exception as e:
-                    # Catch any other errors during message processing
                     logger.error(f"❌ Error processing message: {e}", exc_info=True)
 
             elif msg.type == WSMsgType.ERROR:
@@ -455,7 +465,7 @@ HTML_CLIENT = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>UltraChat S2S - FINAL FIX</title>
+    <title>UltraChat S2S - DEFINITIVE FIX</title>
     <style>
         body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; min-height: 100vh; }
         .container { background: rgba(255, 255, 255, 0.1); border-radius: 20px; padding: 30px; backdrop-filter: blur(10px); box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1); }
@@ -477,7 +487,7 @@ HTML_CLIENT = """
 </head>
 <body>
     <div class="container">
-        <h1>🎤 Real-time S2S AI Chat - FINAL FIX</h1>
+        <h1>🎤 Real-time S2S AI Chat - DEFINITIVE FIX</h1>
         <div class="fix-note">
             <strong>✅ Definitive Fix Applied:</strong> This version corrects the ICE candidate format mismatch between the browser and the Python server, ensuring a stable WebRTC connection.
         </div>
@@ -602,7 +612,7 @@ HTML_CLIENT = """
                     addDebugMessage('Candidate event fired');
                     if (event.candidate && websocket && websocket.readyState === WebSocket.OPEN) {
                         // Send a flat JSON object that matches what the Python server expects.
-                        websocket.send(JSON.stringify({
+                        websocket.send(JSON.JSON.stringify({
                             type: 'ice-candidate',
                             candidate: event.candidate.candidate,
                             sdpMid: event.candidate.sdpMid,
