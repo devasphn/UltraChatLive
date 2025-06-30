@@ -11,7 +11,7 @@ import ssl
 import os
 import fractions
 from aiohttp import web, web_runner, WSMsgType
-from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack, RTCIceCandidate, RTCConfiguration
+from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack, RTCIceCandidate, RTCConfiguration, RTCIceServer # Import RTCIceServer
 import av  # PyAV for AudioFrame
 from aiortc.contrib.media import MediaRecorder, MediaRelay, MediaBlackhole
 from transformers import pipeline
@@ -444,13 +444,13 @@ class AudioStreamTrack(MediaStreamTrack):
 
 class WebRTCConnection:
     def __init__(self):
-        # CRITICAL FIX: Proper RTCConfiguration with bundlePolicy
+        # CRITICAL FIX: Proper RTCConfiguration with bundlePolicy and RTCIceServer objects
         configuration = RTCConfiguration(
             iceServers=[
-                {"urls": "stun:stun.l.google.com:19302"},
-                {"urls": "stun:stun1.l.google.com:19302"}
+                RTCIceServer("stun:stun.l.google.com:19302"), # Use RTCIceServer object
+                RTCIceServer("stun:stun1.l.google.com:19302") # Use RTCIceServer object
             ],
-            bundlePolicy="balanced"  # bundlePolicy goes HERE, not on RTCSessionDescription
+            bundlePolicy="balanced"
         )
         self.pc = RTCPeerConnection(configuration=configuration)
         self.audio_track = AudioStreamTrack()
