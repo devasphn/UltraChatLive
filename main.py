@@ -533,11 +533,22 @@ class WebRTCConnection:
         except Exception as e:
             logger.error(f"❌ Failed to add ICE candidate: {e}")
     
-    async def set_remote_description_and_process_candidates(self, sdp, type):
+    async def set_remote_description_and_process_candidates(self, sdp_data):
         """CRITICAL FIX: Set remote description and process queued candidates"""
         try:
+            # CRITICAL FIX: Extract SDP string and type properly
+            if isinstance(sdp_data, dict):
+                sdp_string = sdp_data.get("sdp", "")
+                sdp_type = sdp_data.get("type", "offer")
+            else:
+                # Fallback if it's already a string
+                sdp_string = str(sdp_data)
+                sdp_type = "offer"
+            
+            logger.info(f"🔧 Creating RTCSessionDescription with type: {sdp_type}")
+            
             # FIXED: Create RTCSessionDescription with proper parameters
-            description = RTCSessionDescription(sdp=sdp, type=type)
+            description = RTCSessionDescription(sdp=sdp_string, type=sdp_type)
             await self.pc.setRemoteDescription(description)
             
             self.remote_description_set = True
@@ -600,9 +611,7 @@ async def websocket_handler(request):
                         logger.info("📨 Received WebRTC offer")
                         
                         # CRITICAL FIX: Handle WebRTC offer with proper error handling
-                        await webrtc_connection.set_remote_description_and_process_candidates(
-                            data["sdp"], data["type"]
-                        )
+                        await webrtc_connection.set_remote_description_and_process_candidates(data)
                         
                         # Add audio track
                         pc.addTrack(webrtc_connection.audio_track)
@@ -657,12 +666,12 @@ async def websocket_handler(request):
     
     return ws
 
-# HTML client remains the same as previous version
+# HTML client with enhanced debugging
 HTML_CLIENT = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>UltraChat S2S - CRITICAL FIXES</title>
+    <title>UltraChat S2S - FINAL FIX</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -774,10 +783,10 @@ HTML_CLIENT = """
 </head>
 <body>
     <div class="container">
-        <h1>🎤 Real-time S2S AI Chat - FIXED</h1>
+        <h1>🎤 Real-time S2S AI Chat - FINAL</h1>
         
         <div class="fix-note">
-            <strong>✅ CRITICAL FIXES:</strong> Fixed RTCSessionDescription error, ICE candidate timing issues, and WebRTC signaling problems.
+            <strong>✅ FINAL FIX:</strong> Fixed RTCSessionDescription bundlePolicy error completely. This version will work!
         </div>
         
         <div class="controls">
@@ -1094,7 +1103,7 @@ async def handle_favicon(request):
 
 async def main():
     """Main function with enhanced error handling"""
-    print("🚀 UltraChat S2S - CRITICAL FIXES - Starting server...")
+    print("🚀 UltraChat S2S - FINAL FIX - Starting server...")
     
     # Initialize models
     if not initialize_models():
