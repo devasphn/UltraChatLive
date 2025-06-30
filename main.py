@@ -1,4 +1,4 @@
-# --- START OF FILE ULTRAVOXLIVETEMP.py ---
+# --- START OF FILE main.py ---
 
 import torch
 import asyncio
@@ -271,10 +271,6 @@ class AudioStreamTrack(MediaStreamTrack):
         if self._consumer_task: self._consumer_task.cancel()
 
 
-### <<< FIX START >>> ###
-# This new class is the key to solving the problem. It reliably consumes
-# the incoming audio track, preventing the connection from stalling.
-
 class AudioFrameProcessor:
     def __init__(self, audio_track_to_process: AudioStreamTrack):
         self.track = None
@@ -302,35 +298,25 @@ class AudioFrameProcessor:
         try:
             while True:
                 frame = await self.track.recv()
-                
-                # Convert PyAV frame to NumPy array
                 audio_data = frame.to_ndarray()
                 
-                # We expect mono float32, but let's be safe
                 if len(audio_data.shape) > 1:
                     audio_data = audio_data[0] # Take the first channel
                 if audio_data.dtype != np.float32:
                     audio_data = audio_data.astype(np.float32)
                 
-                # Add data to our buffer
                 self.audio_buffer.add_audio(audio_data)
 
-                # Check if buffer is ready for processing
                 if self.audio_buffer.should_process():
                     audio_for_processing = self.audio_buffer.get_audio_array()
                     self.audio_buffer.reset()
-                    
-                    # Offload the heavy AI work to a background task
-                    # so we don't block the audio receiving loop
                     asyncio.create_task(self._process_speech(audio_for_processing))
-
         except asyncio.CancelledError:
             logger.info("Audio processing task cancelled.")
         except Exception as e:
             logger.error(f"❌ Unhandled error in AudioFrameProcessor: {e}", exc_info=True)
 
     async def _process_speech(self, audio_array):
-        """Process speech and generate response"""
         try:
             logger.info(f"🧠 Processing speech ({len(audio_array)} samples) with Ultravox...")
             response_text = await self._generate_response(audio_array)
@@ -345,7 +331,6 @@ class AudioFrameProcessor:
             logger.error(f"❌ Error processing speech: {e}", exc_info=True)
 
     async def _generate_response(self, audio_array):
-        """Generate response using Ultravox"""
         try:
             turns = [{
                 "role": "system",
@@ -372,8 +357,6 @@ class AudioFrameProcessor:
             logger.error(f"❌ Error in Ultravox generation: {e}", exc_info=True)
             return "I seem to be having trouble thinking right now."
 
-### <<< FIX END >>> ###
-
 
 class WebRTCConnection:
     def __init__(self):
@@ -381,7 +364,6 @@ class WebRTCConnection:
         self.audio_track = AudioStreamTrack() # This is the track we SEND to the client
         self.frame_processor = None # This will handle the track we RECEIVE from the client
         
-        # Add event handlers
         @self.pc.on("iceconnectionstatechange")
         async def on_ice_connection_state_change():
             logger.info(f"🧊 ICE connection state: {self.pc.iceConnectionState}")
@@ -392,8 +374,6 @@ class WebRTCConnection:
         def on_track(track):
             logger.info(f"🎧 Track received: {track.kind}")
             if track.kind == "audio":
-                # ### <<< FIX >>> ###
-                # Instantiate and start our new, robust processor
                 self.frame_processor = AudioFrameProcessor(audio_track_to_process=self.audio_track)
                 self.frame_processor.addTrack(track)
                 asyncio.create_task(self.frame_processor.start())
@@ -401,19 +381,11 @@ class WebRTCConnection:
     async def handle_offer(self, sdp, type):
         description = RTCSessionDescription(sdp=sdp, type=type)
         await self.pc.setRemoteDescription(description)
-
-        # Add our outgoing audio track
         self.pc.addTrack(self.audio_track)
-
-        # Start the consumer for the outgoing track
         self.audio_track.start_consumer()
-        # Use MediaBlackhole to pull frames from the outgoing track, which is necessary
-        # for the `recv` method to be called.
         recorder = MediaBlackhole()
         recorder.addTrack(self.audio_track)
         await recorder.start()
-
-        # Create and set answer
         answer = await self.pc.createAnswer()
         await self.pc.setLocalDescription(answer)
         return self.pc.localDescription
@@ -449,13 +421,22 @@ async def websocket_handler(request):
                         "sdp": local_description.sdp
                     }))
                     logger.info("📤 Sent WebRTC answer")
+                
+                # ### <<< FIX IS HERE >>> ###
                 elif data["type"] == "ice-candidate" and data.get("candidate"):
-                    candidate = RTCIceCandidate(
-                        sdpMid=data["candidate"]["sdpMid"],
-                        sdpMLineIndex=data["candidate"]["sdpMLineIndex"],
-                        candidate=data["candidate"]["candidate"]
-                    )
-                    await connection.pc.addIceCandidate(candidate)
+                    try:
+                        candidate_data = data["candidate"]
+                        # The candidate string is the first positional argument.
+                        candidate = RTCIceCandidate(
+                            candidate_data["candidate"],
+                            sdpMid=candidate_data.get("sdpMid"),
+                            sdpMLineIndex=candidate_data.get("sdpMLineIndex")
+                        )
+                        await connection.pc.addIceCandidate(candidate)
+                    except Exception as e:
+                        logger.error(f"Error adding ICE candidate: {e}", exc_info=True)
+                # ### <<< END OF FIX >>> ###
+
             elif msg.type == WSMsgType.ERROR:
                 logger.error(f'❌ WebSocket error: {ws.exception()}')
     except Exception as e:
@@ -465,7 +446,7 @@ async def websocket_handler(request):
         logger.info(f"🔌 Closed WebSocket connection: {connection_id}")
     return ws
 
-# The HTML client remains the same, as the issues were purely server-side.
+# The HTML client remains the same.
 HTML_CLIENT = """
 <!DOCTYPE html>
 <html>
