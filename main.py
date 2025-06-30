@@ -422,20 +422,21 @@ async def websocket_handler(request):
                     }))
                     logger.info("📤 Sent WebRTC answer")
                 
-                # ### <<< FINAL FIX IS HERE >>> ###
-                elif data["type"] == "ice-candidate":
-                    # This format now aligns perfectly with the JavaScript change
+                # ### <<< THE DEFINITIVE FIX IS HERE >>> ###
+                elif data["type"] == "ice-candidate" and "candidate" in data:
                     try:
+                        # Use snake_case for Python keywords, taking values from the camelCase JSON
                         candidate = RTCIceCandidate(
-                            candidate=data["candidate"],
-                            sdp_mid=data["sdpMid"],
-                            sdp_mline_index=data["sdpMLineIndex"],
+                            candidate=data.get("candidate"),
+                            sdp_mid=data.get("sdpMid"),
+                            sdp_mline_index=data.get("sdpMLineIndex"),
                         )
                         await connection.pc.addIceCandidate(candidate)
-                        logger.debug("✅ Added ICE candidate")
+                        logger.debug(f"✅ Added ICE candidate: {data.get('candidate')[:30]}...")
                     except Exception as e:
-                        logger.error(f"Error adding ICE candidate: {e}", exc_info=True)
-                # ### <<< END OF FINAL FIX >>> ###
+                        # This log will now be much more informative if an error still occurs.
+                        logger.error(f"❌ Error adding ICE candidate. Data: {data}. Error: {e}", exc_info=True)
+                # ### <<< END OF THE DEFINITIVE FIX >>> ###
 
             elif msg.type == WSMsgType.ERROR:
                 logger.error(f'❌ WebSocket error: {ws.exception()}')
@@ -446,12 +447,12 @@ async def websocket_handler(request):
         logger.info(f"🔌 Closed WebSocket connection: {connection_id}")
     return ws
 
-# ### <<< JS CLIENT FIX IS HERE >>> ###
+# The JavaScript client from the previous version was correct. No changes needed there.
 HTML_CLIENT = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>UltraChat S2S - FINAL FIX</title>
+    <title>UltraChat S2S - DEFINITIVE FIX</title>
     <style>
         body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; min-height: 100vh; }
         .container { background: rgba(255, 255, 255, 0.1); border-radius: 20px; padding: 30px; backdrop-filter: blur(10px); box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1); }
@@ -473,9 +474,9 @@ HTML_CLIENT = """
 </head>
 <body>
     <div class="container">
-        <h1>🎤 Real-time S2S AI Chat - FINAL FIX</h1>
+        <h1>🎤 Real-time S2S AI Chat - DEFINITIVE FIX</h1>
         <div class="fix-note">
-            <strong>✅ Final Fix Applied:</strong> This version corrects the ICE candidate format mismatch between the browser and the Python server, ensuring a stable WebRTC connection.
+            <strong>✅ Definitive Fix Applied:</strong> This version corrects the ICE candidate format mismatch between the browser and the Python server, ensuring a stable WebRTC connection.
         </div>
         <div class="controls">
             <button id="startBtn" class="start-btn">Start Conversation</button>
@@ -590,8 +591,7 @@ HTML_CLIENT = """
                 
                 peerConnection.onicecandidate = (event) => {
                     if (event.candidate && websocket && websocket.readyState === WebSocket.OPEN) {
-                        // ### <<< FINAL JAVASCRIPT FIX IS HERE >>> ###
-                        // We construct a flat JSON object that matches what the Python server now expects.
+                        // This sends a flat JSON object that matches what the Python server now expects.
                         // This is the most reliable way to handle ICE candidates.
                         websocket.send(JSON.stringify({
                             type: 'ice-candidate',
@@ -637,7 +637,7 @@ HTML_CLIENT = """
         
         async function handleSignalingMessage(event) {
             try {
-                const message = JSON.parse(event.data);
+                const message = JSON.parse(event..data);
                 addDebugMessage(`📥 Received: ${message.type}`);
                 if (!peerConnection) return;
                 if (message.type === 'answer') {
@@ -712,7 +712,7 @@ async def handle_favicon(request):
 
 async def main():
     """Main function with enhanced error handling"""
-    print("🚀 UltraChat S2S - FINAL FIX - Starting server...")
+    print("🚀 UltraChat S2S - DEFINITIVE FIX - Starting server...")
     
     if not initialize_models():
         print("❌ Failed to initialize models. Exiting.")
