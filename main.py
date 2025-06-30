@@ -27,13 +27,14 @@ warnings.filterwarnings("ignore")
 
 # ENHANCED LOGGING CONFIGURATION
 logging.basicConfig(
-    level=logging.DEBUG,
+    level=logging.INFO,  # Reduced from DEBUG to reduce noise
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# Suppress empty candidate warnings
+# Suppress verbose logs
 logging.getLogger('aioice.ice').setLevel(logging.WARNING)
+logging.getLogger('aiortc.rtcpeerconnection').setLevel(logging.INFO)
 
 # Global variables for models
 uv_pipe = None
@@ -100,7 +101,7 @@ class SileroVAD:
             )
             
             has_speech = len(speech_timestamps) > 0
-            logger.debug(f"🎯 VAD Result: {has_speech} (found {len(speech_timestamps)} speech segments)")
+            logger.info(f"🎯 VAD Result: {has_speech} (found {len(speech_timestamps)} speech segments)")
             
             return has_speech
             
@@ -177,8 +178,9 @@ class AudioBuffer:
         
         self.total_samples_received += len(audio_data)
         
-        logger.debug(f"🎵 Buffer: {len(self.buffer)}/{self.max_samples} samples "
-                    f"(total received: {self.total_samples_received})")
+        # Log every 100 chunks to avoid spam
+        if self.total_samples_received % (16000 * 2) == 0:  # Every 2 seconds
+            logger.info(f"🎵 Audio received: {self.total_samples_received} total samples")
     
     def get_audio_array(self):
         """Get current audio as numpy array"""
@@ -193,19 +195,13 @@ class AudioBuffer:
         has_enough_audio = len(self.buffer) >= self.min_speech_samples
         enough_time_passed = (current_time - self.last_process_time) >= self.process_interval
         
-        logger.debug(f"🔍 Process check: audio={has_enough_audio} "
-                    f"({len(self.buffer)}/{self.min_speech_samples}), "
-                    f"time={enough_time_passed} "
-                    f"({current_time - self.last_process_time:.1f}s)")
-        
         if has_enough_audio and enough_time_passed:
             audio_array = self.get_audio_array()
             
             # Use VAD to detect speech
             has_speech = vad_model.detect_speech(audio_array, self.sample_rate)
             
-            logger.info(f"🎯 Processing decision: {len(audio_array)} samples, "
-                       f"Speech detected: {has_speech}")
+            logger.info(f"🎯 Processing decision: {len(audio_array)} samples, Speech detected: {has_speech}")
             
             if has_speech:
                 self.last_process_time = current_time
@@ -273,6 +269,9 @@ class AudioStreamTrack(MediaStreamTrack):
         self._consumer_task = None
         self._is_running = False
         
+        # Audio frame counter for debugging
+        self._frames_sent = 0
+        
     def start_consumer(self):
         """Start the audio consumer task"""
         if self._consumer_task is None:
@@ -285,7 +284,7 @@ class AudioStreamTrack(MediaStreamTrack):
         try:
             while self._is_running:
                 await self.recv()
-                await asyncio.sleep(0.1)  # 100ms intervals
+                await asyncio.sleep(0.02)  # 50fps for smoother audio
         except asyncio.CancelledError:
             logger.info("🛑 Audio consumer stopped")
         except Exception as e:
@@ -293,7 +292,7 @@ class AudioStreamTrack(MediaStreamTrack):
         
     async def recv(self):
         """FIXED: Audio frame generation with proper PyAV format"""
-        frame_samples = 1600  # 0.1 seconds at 16kHz
+        frame_samples = 320  # 20ms at 16kHz for better real-time performance
         
         # Check if we have response audio to send
         if self._current_response is None or self._response_position >= len(self._current_response):
@@ -347,12 +346,16 @@ class AudioStreamTrack(MediaStreamTrack):
         # Update timestamp for next frame
         self._timestamp += frame_samples
         
+        # Log progress every 5 seconds
+        self._frames_sent += 1
+        if self._frames_sent % 800 == 0:  # Every ~16 seconds at 50fps
+            logger.info(f"🎵 Sent {self._frames_sent} audio frames")
+        
         return audio_frame
     
     def process_audio_data(self, audio_data):
         """Process incoming audio data with enhanced logging"""
-        logger.debug(f"📥 Received audio data: shape={audio_data.shape}, "
-                    f"dtype={audio_data.dtype}, range=[{audio_data.min():.3f}, {audio_data.max():.3f}]")
+        logger.info(f"📥 AUDIO RECEIVED: shape={audio_data.shape}, dtype={audio_data.dtype}")
         
         self.buffer.add_audio(audio_data)
         
@@ -443,7 +446,28 @@ class AudioStreamTrack(MediaStreamTrack):
 
 class WebRTCConnection:
     def __init__(self):
-        self.pc = RTCPeerConnection()
+        # CRITICAL FIX: Add proper ICE servers including TURN
+        ice_servers = [
+            {"urls": "stun:stun.l.google.com:19302"},
+            {"urls": "stun:stun1.l.google.com:19302"},
+            {"urls": "stun:stun2.l.google.com:19302"},
+            # Add free TURN servers for better connectivity
+            {
+                "urls": "turn:openrelay.metered.ca:80",
+                "username": "openrelayproject",
+                "credential": "openrelayproject"
+            },
+            {
+                "urls": "turn:openrelay.metered.ca:443",
+                "username": "openrelayproject", 
+                "credential": "openrelayproject"
+            }
+        ]
+        
+        self.pc = RTCPeerConnection(configuration={
+            "iceServers": ice_servers,
+            "iceCandidatePoolSize": 10  # Generate more ICE candidates
+        })
         self.audio_track = AudioStreamTrack()
         self.recorder = None
         
@@ -458,6 +482,14 @@ class WebRTCConnection:
             if track.kind == "audio":
                 # Handle incoming audio
                 asyncio.create_task(self._handle_audio_track(track))
+        
+        @self.pc.on("iceconnectionstatechange")
+        def on_ice_connection_state_change():
+            logger.info(f"🧊 ICE connection state: {self.pc.iceConnectionState}")
+            
+        @self.pc.on("connectionstatechange")
+        def on_connection_state_change():
+            logger.info(f"🔗 Connection state: {self.pc.connectionState}")
     
     async def _handle_audio_track(self, track):
         """Handle incoming audio track with enhanced error handling"""
@@ -472,9 +504,9 @@ class WebRTCConnection:
                     # Convert frame to numpy array
                     audio_data = frame.to_ndarray()
                     
-                    # Log every 50th frame to avoid spam
-                    if frame_count % 50 == 0:
-                        logger.debug(f"🎵 Processed {frame_count} audio frames")
+                    # Log first few frames and then every 100th frame
+                    if frame_count <= 5 or frame_count % 100 == 0:
+                        logger.info(f"🎵 Received audio frame {frame_count}: {audio_data.shape}")
                     
                     # Process with our audio track
                     self.audio_track.process_audio_data(audio_data)
@@ -513,7 +545,7 @@ def is_valid_ice_candidate(candidate_data):
 # WebSocket handler with enhanced error handling
 async def websocket_handler(request):
     """Handle WebSocket connections with comprehensive error handling"""
-    ws = web.WebSocketResponse()
+    ws = web.WebSocketResponse(heartbeat=30)  # Add heartbeat
     await ws.prepare(request)
     
     connection_id = id(ws)
@@ -604,12 +636,12 @@ async def websocket_handler(request):
     
     return ws
 
-# Enhanced HTML client with better debugging
+# Enhanced HTML client with better debugging and TURN servers
 HTML_CLIENT = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>UltraChat S2S - FIXED</title>
+    <title>UltraChat S2S - FIXED v2</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -699,23 +731,16 @@ HTML_CLIENT = """
             margin: 20px 0;
             font-family: monospace;
             font-size: 12px;
-            max-height: 200px;
+            max-height: 300px;
             overflow-y: auto;
         }
-        .instructions {
+        .connection-info {
             background: rgba(255, 255, 255, 0.1);
             border-radius: 10px;
-            padding: 20px;
-            margin-top: 20px;
-        }
-        .instructions h3 {
-            margin-top: 0;
-        }
-        .instructions ul {
-            padding-left: 20px;
-        }
-        .instructions li {
-            margin: 10px 0;
+            padding: 15px;
+            margin: 20px 0;
+            font-family: monospace;
+            font-size: 12px;
         }
         .fix-note {
             background: rgba(76, 175, 80, 0.2);
@@ -728,10 +753,10 @@ HTML_CLIENT = """
 </head>
 <body>
     <div class="container">
-        <h1>🎤 Real-time S2S AI Chat</h1>
+        <h1>🎤 Real-time S2S AI Chat v2</h1>
         
         <div class="fix-note">
-            <strong>✅ FIXED:</strong> All critical issues resolved - PyAV format, MediaBlackhole consumer, debug logging, and model loading.
+            <strong>✅ FIXED v2:</strong> Added TURN servers, enhanced ICE handling, improved audio processing, and better connection monitoring.
         </div>
         
         <div class="controls">
@@ -739,25 +764,18 @@ HTML_CLIENT = """
             <button id="stopBtn" class="stop-btn" disabled>Stop Conversation</button>
         </div>
         
-        <div id="status" class="status">Ready - Start speaking!</div>
+        <div id="status" class="status">Ready - Click Start to begin!</div>
         
         <div class="audio-visualizer" id="visualizer">
-            Listening...
+            Waiting to start...
+        </div>
+        
+        <div class="connection-info" id="connectionInfo">
+            Connection Status: Not connected
         </div>
         
         <div class="debug-info" id="debugInfo">
             Debug info will appear here...
-        </div>
-        
-        <div class="instructions">
-            <h3>Instructions:</h3>
-            <ul>
-                <li>Click "Start Conversation" to begin</li>
-                <li>Allow microphone access when prompted</li>
-                <li>Speak naturally - the AI will detect when you're done speaking</li>
-                <li>The AI will respond with voice automatically</li>
-                <li>Click "Stop Conversation" to end the session</li>
-            </ul>
         </div>
     </div>
 
@@ -767,12 +785,14 @@ HTML_CLIENT = """
         let localStream = null;
         let audioContext = null;
         let analyser = null;
+        let connectionStartTime = null;
         
         const startBtn = document.getElementById('startBtn');
         const stopBtn = document.getElementById('stopBtn');
         const status = document.getElementById('status');
         const visualizer = document.getElementById('visualizer');
         const debugInfo = document.getElementById('debugInfo');
+        const connectionInfo = document.getElementById('connectionInfo');
         
         startBtn.addEventListener('click', startConversation);
         stopBtn.addEventListener('click', stopConversation);
@@ -784,6 +804,10 @@ HTML_CLIENT = """
             console.log(message);
         }
         
+        function updateConnectionInfo(info) {
+            connectionInfo.textContent = info;
+        }
+        
         function getWebSocketUrl() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
             const host = window.location.host;
@@ -792,15 +816,19 @@ HTML_CLIENT = """
         
         async function startConversation() {
             try {
+                connectionStartTime = Date.now();
                 updateStatus('🔄 Connecting...', '');
                 addDebugMessage('🚀 Starting conversation...');
                 
+                // Enhanced audio constraints
                 localStream = await navigator.mediaDevices.getUserMedia({
                     audio: {
                         echoCancellation: true,
                         noiseSuppression: true,
                         autoGainControl: true,
-                        sampleRate: 16000
+                        sampleRate: 16000,
+                        channelCount: 1,
+                        latency: 0.02  // 20ms latency
                     }
                 });
                 
@@ -813,6 +841,7 @@ HTML_CLIENT = """
                 
                 websocket.onopen = () => {
                     updateStatus('🔄 Connected - Setting up audio...', 'connected');
+                    updateConnectionInfo('WebSocket: Connected');
                     addDebugMessage('✅ WebSocket connected');
                     setupWebRTC();
                 };
@@ -820,12 +849,14 @@ HTML_CLIENT = """
                 websocket.onmessage = handleSignalingMessage;
                 websocket.onerror = (error) => {
                     updateStatus('❌ Connection error', 'error');
+                    updateConnectionInfo('WebSocket: Error');
                     addDebugMessage(`❌ WebSocket error: ${error}`);
                 };
                 
-                websocket.onclose = () => {
+                websocket.onclose = (event) => {
                     updateStatus('🔌 Connection closed', 'error');
-                    addDebugMessage('🔌 WebSocket closed');
+                    updateConnectionInfo(`WebSocket: Closed (${event.code})`);
+                    addDebugMessage(`🔌 WebSocket closed: ${event.code} - ${event.reason}`);
                 };
                 
                 startBtn.disabled = true;
@@ -841,11 +872,24 @@ HTML_CLIENT = """
             try {
                 addDebugMessage('🔧 Setting up WebRTC...');
                 
+                // Enhanced ICE configuration with TURN servers
                 peerConnection = new RTCPeerConnection({
                     iceServers: [
                         { urls: 'stun:stun.l.google.com:19302' },
-                        { urls: 'stun:stun1.l.google.com:19302' }
-                    ]
+                        { urls: 'stun:stun1.l.google.com:19302' },
+                        { urls: 'stun:stun2.l.google.com:19302' },
+                        {
+                            urls: 'turn:openrelay.metered.ca:80',
+                            username: 'openrelayproject',
+                            credential: 'openrelayproject'
+                        },
+                        {
+                            urls: 'turn:openrelay.metered.ca:443',
+                            username: 'openrelayproject',
+                            credential: 'openrelayproject'
+                        }
+                    ],
+                    iceCandidatePoolSize: 10
                 });
                 
                 localStream.getTracks().forEach(track => {
@@ -867,12 +911,34 @@ HTML_CLIENT = """
                                 type: 'ice-candidate',
                                 candidate: event.candidate
                             }));
-                            addDebugMessage('📤 Sent ICE candidate');
+                            addDebugMessage(`📤 Sent ICE candidate: ${event.candidate.type}`);
                         }
                     }
                 };
                 
-                const offer = await peerConnection.createOffer();
+                peerConnection.oniceconnectionstatechange = () => {
+                    const state = peerConnection.iceConnectionState;
+                    updateConnectionInfo(`ICE: ${state}`);
+                    addDebugMessage(`🧊 ICE connection state: ${state}`);
+                    
+                    if (state === 'connected' || state === 'completed') {
+                        const duration = Date.now() - connectionStartTime;
+                        updateStatus('✅ Connected - Start speaking!', 'connected');
+                        addDebugMessage(`✅ Connection established in ${duration}ms`);
+                    } else if (state === 'failed' || state === 'closed') {
+                        updateStatus('❌ Connection failed', 'error');
+                        addDebugMessage('❌ ICE connection failed');
+                    }
+                };
+                
+                peerConnection.onconnectionstatechange = () => {
+                    const state = peerConnection.connectionState;
+                    addDebugMessage(`🔗 Connection state: ${state}`);
+                };
+                
+                const offer = await peerConnection.createOffer({
+                    offerToReceiveAudio: true
+                });
                 await peerConnection.setLocalDescription(offer);
                 
                 if (websocket.readyState === WebSocket.OPEN) {
@@ -882,8 +948,6 @@ HTML_CLIENT = """
                     }));
                     addDebugMessage('📤 Sent WebRTC offer');
                 }
-                
-                updateStatus('✅ Ready - Start speaking!', 'connected');
                 
             } catch (error) {
                 updateStatus('❌ WebRTC setup error: ' + error.message, 'error');
@@ -905,7 +969,7 @@ HTML_CLIENT = """
                 } else if (message.type === 'ice-candidate') {
                     if (message.candidate && message.candidate.candidate && message.candidate.candidate.trim() !== '') {
                         await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
-                        addDebugMessage('✅ Added ICE candidate');
+                        addDebugMessage(`✅ Added ICE candidate: ${message.candidate.type || 'unknown'}`);
                     }
                 }
             } catch (error) {
@@ -924,10 +988,12 @@ HTML_CLIENT = """
             const dataArray = new Uint8Array(bufferLength);
             
             let lastSpeechTime = 0;
+            let frameCount = 0;
             
             function updateVisualization() {
                 if (!analyser) return;
                 
+                frameCount++;
                 analyser.getByteFrequencyData(dataArray);
                 const average = dataArray.reduce((a, b) => a + b) / bufferLength;
                 
@@ -935,13 +1001,18 @@ HTML_CLIENT = """
                     rgba(76, 175, 80, ${average / 255}) 0%, 
                     rgba(33, 150, 243, ${average / 255}) 100%)`;
                 
-                if (average > 50) {
+                if (average > 30) {
                     visualizer.textContent = '🎤 Speaking...';
                     lastSpeechTime = Date.now();
-                } else if (Date.now() - lastSpeechTime < 2000) {
+                } else if (Date.now() - lastSpeechTime < 3000) {
                     visualizer.textContent = '🎧 Processing...';
                 } else {
                     visualizer.textContent = '👂 Listening...';
+                }
+                
+                // Log audio level every 5 seconds
+                if (frameCount % 300 == 0) {
+                    addDebugMessage(`🎵 Audio level: ${average.toFixed(1)}`);
                 }
                 
                 requestAnimationFrame(updateVisualization);
@@ -953,6 +1024,7 @@ HTML_CLIENT = """
         function playAudio(remoteStream) {
             const audio = new Audio();
             audio.srcObject = remoteStream;
+            audio.autoplay = true;
             audio.play().then(() => {
                 addDebugMessage('🔊 Playing AI response');
             }).catch(error => {
@@ -983,11 +1055,12 @@ HTML_CLIENT = """
             }
             
             updateStatus('🔌 Disconnected', '');
+            updateConnectionInfo('Connection Status: Disconnected');
             startBtn.disabled = false;
             stopBtn.disabled = true;
             
             visualizer.style.background = 'rgba(255, 255, 255, 0.1)';
-            visualizer.textContent = 'Listening...';
+            visualizer.textContent = 'Waiting to start...';
             
             addDebugMessage('🛑 Conversation stopped');
         }
@@ -1012,7 +1085,7 @@ async def handle_favicon(request):
 
 async def main():
     """Main function with enhanced error handling"""
-    print("🚀 UltraChat S2S - Starting server...")
+    print("🚀 UltraChat S2S v2 - Starting server...")
     
     # Initialize models
     if not initialize_models():
