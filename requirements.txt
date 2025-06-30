@@ -1,15 +1,26 @@
+# Core ML/DL
 torch==2.6.0
-torchvision==0.21.0
-torchaudio==2.6.0
+# torchvision and torchaudio are often installed with torch, but not directly imported.
+# If specific features are used or for environment consistency, keep them.
+# For now, commenting them out as direct imports are not visible.
+# torchvision==0.21.0
+# torchaudio==2.6.0
 transformers>=4.46.0
-librosa>=0.11.0
-chatterbox-tts>=0.1.2
-numpy>=1.26.0
-scipy>=1.15.0
-huggingface-hub>=0.33.0
-peft
-accelerate
+peft # Often used with transformers for specific model types/optimizations
+accelerate # For transformers device_map="auto" and other optimizations
 
-# Real-time streaming and VAD
-fastrtc[vad,tts]
-soundfile
+# Speech Synthesis
+chatterbox-tts>=0.1.2 # Handles its own sub-dependencies like librosa, soundfile, scipy
+
+# WebRTC and Async Web Server
+aiohttp>=3.9.0 # For the web server and WebSocket handling
+aiortc>=1.5.0  # For WebRTC peer connection and media tracks
+PyAV>=10.0.0   # For aiortc audio/video frame manipulation (explicitly AudioFrame)
+
+# Numerical Processing (often a sub-dependency, but good to specify a minimum)
+numpy>=1.26.0
+
+# Note: SileroVAD is loaded via torch.hub, no separate PyPI package needed.
+# Removed: librosa, scipy, huggingface-hub, soundfile (handled by chatterbox-tts or transformers)
+# Removed: websockets (aiohttp handles WebSockets)
+# Removed: fastrtc (preferring explicit aiortc and other direct dependencies)
