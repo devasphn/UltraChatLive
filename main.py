@@ -353,7 +353,7 @@ class AudioStreamTrack(MediaStreamTrack):
     
     def process_audio_data(self, audio_data):
         """Process incoming audio data with enhanced logging"""
-        logger.info(f"📥 AUDIO RECEIVED: shape={audio_data.shape}, dtype={audio_data.dtype}")
+        logger.info(f"📥 AUDIO RECEIVED for processing: shape={audio_data.shape}, dtype={audio_data.dtype}, Max abs value: {np.max(np.abs(audio_data))}")
         
         self.buffer.add_audio(audio_data)
         
@@ -481,7 +481,7 @@ class WebRTCConnection:
             logger.info(f"🔗 Connection state: {self.pc.connectionState}")
     
     async def _handle_audio_track(self, track):
-        """Handle incoming audio track with enhanced error handling"""
+        """Handle incoming audio track with enhanced error handling and logging"""
         logger.info("🎧 Starting audio track handler...")
         frame_count = 0
         try:
@@ -490,22 +490,27 @@ class WebRTCConnection:
                     frame = await track.recv()
                     frame_count += 1
                     
+                    # Log the receipt of each incoming frame
+                    logger.info(f"🎵 Received incoming audio frame {frame_count}. Samples: {frame.samples}, Timestamp: {frame.pts}, Time base: {frame.time_base}")
+                    
                     # Convert frame to numpy array
                     audio_data = frame.to_ndarray()
                     
-                    # Log first few frames and then every 100th frame
-                    if frame_count <= 5 or frame_count % 100 == 0:
-                        logger.info(f"🎵 Received audio frame {frame_count}: {audio_data.shape}")
+                    # Log shape, data type, and max absolute value of converted audio to check for silence
+                    logger.info(f"📥 Converted audio data for processing: shape={audio_data.shape}, dtype={audio_data.dtype}, Max abs value: {np.max(np.abs(audio_data))}")
                     
                     # Process with our audio track
                     self.audio_track.process_audio_data(audio_data)
                     
                 except Exception as frame_error:
-                    logger.error(f"❌ Frame processing error: {frame_error}")
+                    logger.error(f"❌ Frame processing error in _handle_audio_track: {frame_error}")
+                    # This 'continue' ensures the loop doesn't break on a single frame error
                     continue
                     
+        except asyncio.CancelledError:
+            logger.info("🛑 Audio track handler stopped.")
         except Exception as e:
-            logger.error(f"❌ Error handling audio track: {e}")
+            logger.error(f"❌ Unhandled error in _handle_audio_track loop: {e}")
     
     async def add_ice_candidate_safe(self, candidate_data):
         """CRITICAL FIX: Safely add ICE candidates with proper timing"""
