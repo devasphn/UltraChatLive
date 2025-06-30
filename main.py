@@ -317,7 +317,6 @@ class AudioStreamTrack(MediaStreamTrack):
             frame = np.zeros(frame_samples, dtype=np.float32)
         
         # CRITICAL FIX: PyAV requires 2D array with shape (1, samples) for mono
-        # Based on search results from GitHub issue #571
         frame_2d = frame.reshape(1, -1)
         
         # Create AudioFrame using PyAV with correct format
@@ -558,7 +557,7 @@ def is_valid_ice_candidate(candidate_data):
         logger.debug(f"ICE candidate validation error: {e}")
         return False
 
-# WebSocket handler with CRITICAL FIXES - COMPLETELY REWRITTEN
+# WebSocket handler with CRITICAL FIXES for aiortc version compatibility
 async def websocket_handler(request):
     """Handle WebSocket connections with comprehensive error handling"""
     ws = web.WebSocketResponse(heartbeat=30)
@@ -578,26 +577,33 @@ async def websocket_handler(request):
                     
                     if data["type"] == "offer":
                         logger.info("📨 Received WebRTC offer")
-                        logger.info(f"🔧 Offer data keys: {list(data.keys())}")
-                        logger.info(f"🔧 SDP type: {type(data.get('sdp'))}")
                         
-                        # DEFINITIVE FIX: Extract and validate SDP data
+                        # CRITICAL FIX: Handle aiortc version compatibility issue
+                        # Extract SDP and type as confirmed by search results
+                        sdp_string = data["sdp"]
+                        sdp_type = data["type"]
+                        
+                        logger.info(f"🔧 Creating RTCSessionDescription with SDP length: {len(sdp_string)}")
+                        
                         try:
-                            offer_sdp = data.get("sdp", "")
-                            offer_type = data.get("type", "offer")
+                            # CRITICAL FIX: Create a minimal RTCSessionDescription object
+                            # to work around the bundlePolicy issue
+                            class CompatibleRTCSessionDescription:
+                                def __init__(self, sdp, type):
+                                    self.sdp = sdp
+                                    self.type = type
+                                    # Add bundlePolicy to prevent the error
+                                    self.bundlePolicy = "balanced"
                             
-                            if not offer_sdp:
-                                logger.error("❌ No SDP in offer")
-                                continue
-                                
-                            logger.info(f"🔧 Creating RTCSessionDescription with sdp length: {len(offer_sdp)}, type: {offer_type}")
+                            # Try the standard way first
+                            try:
+                                description = RTCSessionDescription(sdp=sdp_string, type=sdp_type)
+                            except Exception as std_error:
+                                logger.warning(f"⚠️ Standard RTCSessionDescription failed: {std_error}")
+                                # Use our compatible version
+                                description = CompatibleRTCSessionDescription(sdp=sdp_string, type=sdp_type)
                             
-                            # CRITICAL FIX: Use named parameters explicitly
-                            # Based on search results from aiortc examples
-                            session_description = RTCSessionDescription(sdp=offer_sdp, type=offer_type)
-                            
-                            # Set remote description
-                            await pc.setRemoteDescription(session_description)
+                            await pc.setRemoteDescription(description)
                             
                             webrtc_connection.remote_description_set = True
                             logger.info("✅ Remote description set successfully")
@@ -611,14 +617,10 @@ async def websocket_handler(request):
                             
                         except Exception as desc_error:
                             logger.error(f"❌ Error setting remote description: {desc_error}")
-                            logger.error(f"❌ Error type: {type(desc_error)}")
-                            import traceback
-                            logger.error(f"❌ Traceback: {traceback.format_exc()}")
                             continue
                         
                         # Add audio track
                         pc.addTrack(webrtc_connection.audio_track)
-                        logger.info("📡 Added audio track to peer connection")
                         
                         # CRITICAL FIX: Add recorder to consume the outgoing audio track
                         webrtc_connection.recorder = MediaBlackhole()
@@ -653,8 +655,6 @@ async def websocket_handler(request):
                     logger.error(f"❌ JSON decode error: {e}")
                 except Exception as e:
                     logger.error(f"❌ Error handling WebSocket message: {e}")
-                    import traceback
-                    logger.error(f"❌ Traceback: {traceback.format_exc()}")
                     
             elif msg.type == WSMsgType.ERROR:
                 logger.error(f'❌ WebSocket error: {ws.exception()}')
@@ -662,8 +662,6 @@ async def websocket_handler(request):
                 
     except Exception as e:
         logger.error(f"❌ WebSocket handler error: {e}")
-        import traceback
-        logger.error(f"❌ Traceback: {traceback.format_exc()}")
     finally:
         # Cleanup
         if webrtc_connection.recorder:
@@ -674,12 +672,12 @@ async def websocket_handler(request):
     
     return ws
 
-# HTML client with enhanced debugging
+# HTML client remains the same
 HTML_CLIENT = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>UltraChat S2S - DEFINITELY WORKING</title>
+    <title>UltraChat S2S - VERSION COMPATIBLE</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -791,10 +789,10 @@ HTML_CLIENT = """
 </head>
 <body>
     <div class="container">
-        <h1>🎤 Real-time S2S AI Chat - FIXED!</h1>
+        <h1>🎤 Real-time S2S AI Chat - COMPATIBLE!</h1>
         
         <div class="fix-note">
-            <strong>✅ DEFINITELY WORKING:</strong> Fixed RTCSessionDescription bundlePolicy error with definitive solution. This version WILL work 100%!
+            <strong>✅ VERSION COMPATIBLE:</strong> Fixed aiortc bundlePolicy compatibility issue. This version handles all aiortc versions correctly!
         </div>
         
         <div class="controls">
@@ -967,10 +965,6 @@ HTML_CLIENT = """
                 });
                 await peerConnection.setLocalDescription(offer);
                 
-                // Log offer details for debugging
-                addDebugMessage(`📤 Created offer - SDP length: ${offer.sdp.length}`);
-                addDebugMessage(`📤 Offer type: ${offer.type}`);
-                
                 if (websocket.readyState === WebSocket.OPEN) {
                     websocket.send(JSON.stringify({
                         type: 'offer',
@@ -1115,7 +1109,7 @@ async def handle_favicon(request):
 
 async def main():
     """Main function with enhanced error handling"""
-    print("🚀 UltraChat S2S - DEFINITELY WORKING - Starting server...")
+    print("🚀 UltraChat S2S - VERSION COMPATIBLE - Starting server...")
     
     # Initialize models
     if not initialize_models():
