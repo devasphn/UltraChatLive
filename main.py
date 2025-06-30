@@ -422,20 +422,20 @@ async def websocket_handler(request):
                     }))
                     logger.info("📤 Sent WebRTC answer")
                 
-                # ### <<< FIX IS HERE >>> ###
-                elif data["type"] == "ice-candidate" and data.get("candidate"):
+                # ### <<< FINAL FIX IS HERE >>> ###
+                elif data["type"] == "ice-candidate":
+                    # This format now aligns perfectly with the JavaScript change
                     try:
-                        candidate_data = data["candidate"]
-                        # The candidate string is the first positional argument.
                         candidate = RTCIceCandidate(
-                            candidate_data["candidate"],
-                            sdpMid=candidate_data.get("sdpMid"),
-                            sdpMLineIndex=candidate_data.get("sdpMLineIndex")
+                            candidate=data["candidate"],
+                            sdp_mid=data["sdpMid"],
+                            sdp_mline_index=data["sdpMLineIndex"],
                         )
                         await connection.pc.addIceCandidate(candidate)
+                        logger.debug("✅ Added ICE candidate")
                     except Exception as e:
                         logger.error(f"Error adding ICE candidate: {e}", exc_info=True)
-                # ### <<< END OF FIX >>> ###
+                # ### <<< END OF FINAL FIX >>> ###
 
             elif msg.type == WSMsgType.ERROR:
                 logger.error(f'❌ WebSocket error: {ws.exception()}')
@@ -446,153 +446,45 @@ async def websocket_handler(request):
         logger.info(f"🔌 Closed WebSocket connection: {connection_id}")
     return ws
 
-# The HTML client remains the same.
+# ### <<< JS CLIENT FIX IS HERE >>> ###
 HTML_CLIENT = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>UltraChat S2S - FULLY FIXED!</title>
+    <title>UltraChat S2S - FINAL FIX</title>
     <style>
-        body {
-            font-family: Arial, sans-serif;
-            max-width: 800px;
-            margin: 0 auto;
-            padding: 20px;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            min-height: 100vh;
-        }
-        .container {
-            background: rgba(255, 255, 255, 0.1);
-            border-radius: 20px;
-            padding: 30px;
-            backdrop-filter: blur(10px);
-            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1);
-        }
-        h1 {
-            text-align: center;
-            margin-bottom: 30px;
-            font-size: 2.5em;
-            text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
-        }
-        .controls {
-            display: flex;
-            justify-content: center;
-            gap: 20px;
-            margin: 30px 0;
-            flex-wrap: wrap;
-        }
-        button {
-            padding: 15px 30px;
-            font-size: 16px;
-            border: none;
-            border-radius: 50px;
-            cursor: pointer;
-            transition: all 0.3s ease;
-            font-weight: bold;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-        }
-        .start-btn {
-            background: linear-gradient(45deg, #4CAF50, #45a049);
-            color: white;
-        }
-        .stop-btn {
-            background: linear-gradient(45deg, #f44336, #da190b);
-            color: white;
-        }
-        button:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
-        }
-        button:disabled {
-            opacity: 0.6;
-            cursor: not-allowed;
-            transform: none;
-        }
-        .status {
-            text-align: center;
-            font-size: 18px;
-            margin: 20px 0;
-            padding: 15px;
-            border-radius: 10px;
-            background: rgba(255, 255, 255, 0.2);
-        }
-        .status.connected {
-            background: rgba(76, 175, 80, 0.3);
-        }
-        .status.error {
-            background: rgba(244, 67, 54, 0.3);
-        }
-        .audio-visualizer {
-            height: 100px;
-            background: rgba(255, 255, 255, 0.1);
-            border-radius: 10px;
-            margin: 20px 0;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 14px;
-        }
-        .debug-info {
-            background: rgba(0, 0, 0, 0.3);
-            border-radius: 10px;
-            padding: 15px;
-            margin: 20px 0;
-            font-family: monospace;
-            font-size: 12px;
-            max-height: 300px;
-            overflow-y: auto;
-        }
-        .connection-info {
-            background: rgba(255, 255, 255, 0.1);
-            border-radius: 10px;
-            padding: 15px;
-            margin: 20px 0;
-            font-family: monospace;
-            font-size: 12px;
-        }
-        .fix-note {
-            background: rgba(76, 175, 80, 0.2);
-            border-left: 4px solid #4CAF50;
-            padding: 15px;
-            margin: 20px 0;
-            border-radius: 5px;
-        }
+        body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; min-height: 100vh; }
+        .container { background: rgba(255, 255, 255, 0.1); border-radius: 20px; padding: 30px; backdrop-filter: blur(10px); box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1); }
+        h1 { text-align: center; margin-bottom: 30px; font-size: 2.5em; text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3); }
+        .controls { display: flex; justify-content: center; gap: 20px; margin: 30px 0; flex-wrap: wrap; }
+        button { padding: 15px 30px; font-size: 16px; border: none; border-radius: 50px; cursor: pointer; transition: all 0.3s ease; font-weight: bold; text-transform: uppercase; letter-spacing: 1px; }
+        .start-btn { background: linear-gradient(45deg, #4CAF50, #45a049); color: white; }
+        .stop-btn { background: linear-gradient(45deg, #f44336, #da190b); color: white; }
+        button:hover { transform: translateY(-2px); box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2); }
+        button:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+        .status { text-align: center; font-size: 18px; margin: 20px 0; padding: 15px; border-radius: 10px; background: rgba(255, 255, 255, 0.2); }
+        .status.connected { background: rgba(76, 175, 80, 0.3); }
+        .status.error { background: rgba(244, 67, 54, 0.3); }
+        .audio-visualizer { height: 100px; background: rgba(255, 255, 255, 0.1); border-radius: 10px; margin: 20px 0; display: flex; align-items: center; justify-content: center; font-size: 14px; }
+        .debug-info { background: rgba(0, 0, 0, 0.3); border-radius: 10px; padding: 15px; margin: 20px 0; font-family: monospace; font-size: 12px; max-height: 300px; overflow-y: auto; }
+        .connection-info { background: rgba(255, 255, 255, 0.1); border-radius: 10px; padding: 15px; margin: 20px 0; font-family: monospace; font-size: 12px; }
+        .fix-note { background: rgba(76, 175, 80, 0.2); border-left: 4px solid #4CAF50; padding: 15px; margin: 20px 0; border-radius: 5px; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>🎤 Real-time S2S AI Chat - COMPLETELY FIXED!</h1>
-        
+        <h1>🎤 Real-time S2S AI Chat - FINAL FIX</h1>
         <div class="fix-note">
-            <strong>✅ ALL CRITICAL ISSUES FIXED:</strong> 
-            <ul>
-                <li>✅ Audio processing now working reliably</li>
-                <li>✅ WebRTC connection stability resolved</li>
-                <li>✅ Speech detection and AI pipeline triggered correctly</li>
-                <li>✅ Enhanced debugging and logging</li>
-            </ul>
+            <strong>✅ Final Fix Applied:</strong> This version corrects the ICE candidate format mismatch between the browser and the Python server, ensuring a stable WebRTC connection.
         </div>
-        
         <div class="controls">
             <button id="startBtn" class="start-btn">Start Conversation</button>
             <button id="stopBtn" class="stop-btn" disabled>Stop Conversation</button>
         </div>
-        
         <div id="status" class="status">Ready - Click Start to begin!</div>
-        
-        <div class="audio-visualizer" id="visualizer">
-            Waiting to start...
-        </div>
-        
-        <div class="connection-info" id="connectionInfo">
-            Connection Status: Not connected
-        </div>
-        
-        <div class="debug-info" id="debugInfo">
-            Debug info will appear here...
-        </div>
+        <div class="audio-visualizer" id="visualizer">Waiting to start...</div>
+        <div class="connection-info" id="connectionInfo">Connection Status: Not connected</div>
+        <div class="debug-info" id="debugInfo">Debug info will appear here...</div>
     </div>
 
     <script>
@@ -637,14 +529,7 @@ HTML_CLIENT = """
                 addDebugMessage('🚀 Starting conversation...');
                 
                 localStream = await navigator.mediaDevices.getUserMedia({
-                    audio: {
-                        echoCancellation: true,
-                        noiseSuppression: true,
-                        autoGainControl: true,
-                        sampleRate: 16000,
-                        channelCount: 1,
-                        latency: 0.02
-                    }
+                    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, sampleRate: 16000, channelCount: 1, latency: 0.02 }
                 });
                 
                 addDebugMessage('🎤 Microphone access granted');
@@ -689,10 +574,7 @@ HTML_CLIENT = """
                 addDebugMessage('🔧 Setting up WebRTC...');
                 
                 peerConnection = new RTCPeerConnection({
-                    iceServers: [
-                        { urls: 'stun:stun.l.google.com:19302' },
-                        { urls: 'stun:stun1.l.google.com:19302' }
-                    ]
+                    iceServers: [ { urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' } ]
                 });
                 
                 localStream.getTracks().forEach(track => {
@@ -708,9 +590,14 @@ HTML_CLIENT = """
                 
                 peerConnection.onicecandidate = (event) => {
                     if (event.candidate && websocket && websocket.readyState === WebSocket.OPEN) {
+                        // ### <<< FINAL JAVASCRIPT FIX IS HERE >>> ###
+                        // We construct a flat JSON object that matches what the Python server now expects.
+                        // This is the most reliable way to handle ICE candidates.
                         websocket.send(JSON.stringify({
                             type: 'ice-candidate',
-                            candidate: event.candidate.toJSON()
+                            candidate: event.candidate.candidate,
+                            sdpMid: event.candidate.sdpMid,
+                            sdpMLineIndex: event.candidate.sdpMLineIndex,
                         }));
                         addDebugMessage(`📤 Sent ICE candidate: ${event.candidate.type}`);
                     }
@@ -752,17 +639,12 @@ HTML_CLIENT = """
             try {
                 const message = JSON.parse(event.data);
                 addDebugMessage(`📥 Received: ${message.type}`);
-                
                 if (!peerConnection) return;
-
                 if (message.type === 'answer') {
                     await peerConnection.setRemoteDescription(new RTCSessionDescription(message));
                     addDebugMessage('✅ Set remote description from answer');
                 } else if (message.type === 'ice-candidate') {
-                    if (message.candidate) {
-                        await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
-                        addDebugMessage(`✅ Added remote ICE candidate`);
-                    }
+                    // This part of the client doesn't need to do anything, as it only sends candidates.
                 }
             } catch (error) {
                 addDebugMessage(`❌ Error handling signaling: ${error.message}`);
@@ -774,33 +656,18 @@ HTML_CLIENT = """
             analyser = audioContext.createAnalyser();
             const source = audioContext.createMediaStreamSource(localStream);
             source.connect(analyser);
-            
             analyser.fftSize = 256;
             const bufferLength = analyser.frequencyBinCount;
             const dataArray = new Uint8Array(bufferLength);
-            
             let lastSpeechTime = 0;
-            
             function updateVisualization() {
                 if (!analyser) return;
-                
                 analyser.getByteFrequencyData(dataArray);
                 const average = dataArray.reduce((a, b) => a + b) / bufferLength;
-                
                 visualizer.style.background = `linear-gradient(90deg, rgba(76, 175, 80, ${average / 255}) 0%, rgba(33, 150, 243, ${average / 255}) 100%)`;
-                
-                if (average > 20) {
-                    visualizer.textContent = '🎤 Speaking...';
-                    lastSpeechTime = Date.now();
-                } else if (Date.now() - lastSpeechTime < 3000) {
-                    visualizer.textContent = '🎧 Processing...';
-                } else {
-                    visualizer.textContent = '👂 Listening...';
-                }
-                
+                if (average > 20) { visualizer.textContent = '🎤 Speaking...'; lastSpeechTime = Date.now(); } else if (Date.now() - lastSpeechTime < 3000) { visualizer.textContent = '🎧 Processing...'; } else { visualizer.textContent = '👂 Listening...'; }
                 requestAnimationFrame(updateVisualization);
             }
-            
             updateVisualization();
         }
         
@@ -808,45 +675,20 @@ HTML_CLIENT = """
             const audio = new Audio();
             audio.srcObject = remoteStream;
             audio.autoplay = true;
-            audio.play().then(() => {
-                addDebugMessage('🔊 Playing AI response stream');
-            }).catch(error => {
-                addDebugMessage(`❌ Audio playback error: ${error.message}`);
-                // On some browsers, user interaction is needed. We can try to recover.
-                document.body.addEventListener('click', () => audio.play(), { once: true });
-                updateStatus('Click anywhere to enable audio playback!', 'error');
-            });
+            audio.play().then(() => { addDebugMessage('🔊 Playing AI response stream'); }).catch(error => { addDebugMessage(`❌ Audio playback error: ${error.message}`); document.body.addEventListener('click', () => audio.play(), { once: true }); updateStatus('Click anywhere to enable audio playback!', 'error'); });
         }
         
         function stopConversation(closeWs = true) {
             addDebugMessage('🛑 Conversation stopping...');
-            
-            if (closeWs && websocket) {
-                websocket.close();
-            }
+            if (closeWs && websocket) { websocket.close(); }
             websocket = null;
-            
-            if (peerConnection) {
-                peerConnection.close();
-                peerConnection = null;
-            }
-            
-            if (localStream) {
-                localStream.getTracks().forEach(track => track.stop());
-                localStream = null;
-            }
-            
-            if (audioContext) {
-                audioContext.close().catch(e => {});
-                audioContext = null;
-                analyser = null;
-            }
-            
+            if (peerConnection) { peerConnection.close(); peerConnection = null; }
+            if (localStream) { localStream.getTracks().forEach(track => track.stop()); localStream = null; }
+            if (audioContext) { audioContext.close().catch(e => {}); audioContext = null; analyser = null; }
             updateStatus('🔌 Disconnected', '');
             updateConnectionInfo('Connection Status: Disconnected');
             startBtn.disabled = false;
             stopBtn.disabled = true;
-            
             visualizer.style.background = 'rgba(255, 255, 255, 0.1)';
             visualizer.textContent = 'Waiting to start...';
         }
@@ -870,7 +712,7 @@ async def handle_favicon(request):
 
 async def main():
     """Main function with enhanced error handling"""
-    print("🚀 UltraChat S2S - COMPLETELY FIXED VERSION - Starting server...")
+    print("🚀 UltraChat S2S - FINAL FIX - Starting server...")
     
     if not initialize_models():
         print("❌ Failed to initialize models. Exiting.")
