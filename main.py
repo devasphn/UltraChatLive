@@ -27,7 +27,7 @@ warnings.filterwarnings("ignore")
 
 # ENHANCED LOGGING CONFIGURATION
 logging.basicConfig(
-    level=logging.INFO,  # Reduced from DEBUG to reduce noise
+    level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
@@ -87,8 +87,6 @@ class SileroVAD:
             # Normalize audio to [-1, 1] range
             if audio_tensor.abs().max() > 1.0:
                 audio_tensor = audio_tensor / audio_tensor.abs().max()
-            
-            logger.debug(f"🔍 VAD processing {len(audio_tensor)} samples at {sample_rate}Hz")
             
             # Get speech timestamps
             speech_timestamps = self.get_speech_timestamps(
@@ -446,30 +444,19 @@ class AudioStreamTrack(MediaStreamTrack):
 
 class WebRTCConnection:
     def __init__(self):
-        # CRITICAL FIX: Add proper ICE servers including TURN
-        ice_servers = [
-            {"urls": "stun:stun.l.google.com:19302"},
-            {"urls": "stun:stun1.l.google.com:19302"},
-            {"urls": "stun:stun2.l.google.com:19302"},
-            # Add free TURN servers for better connectivity
-            {
-                "urls": "turn:openrelay.metered.ca:80",
-                "username": "openrelayproject",
-                "credential": "openrelayproject"
-            },
-            {
-                "urls": "turn:openrelay.metered.ca:443",
-                "username": "openrelayproject", 
-                "credential": "openrelayproject"
-            }
-        ]
-        
+        # CRITICAL FIX: Simplified ICE configuration
         self.pc = RTCPeerConnection(configuration={
-            "iceServers": ice_servers,
-            "iceCandidatePoolSize": 10  # Generate more ICE candidates
+            "iceServers": [
+                {"urls": "stun:stun.l.google.com:19302"},
+                {"urls": "stun:stun1.l.google.com:19302"}
+            ]
         })
         self.audio_track = AudioStreamTrack()
         self.recorder = None
+        
+        # CRITICAL FIX: ICE candidate queue to handle timing issues
+        self.pending_ice_candidates = []
+        self.remote_description_set = False
         
         # Add event handlers
         @self.pc.on("datachannel")
@@ -517,6 +504,55 @@ class WebRTCConnection:
                     
         except Exception as e:
             logger.error(f"❌ Error handling audio track: {e}")
+    
+    async def add_ice_candidate_safe(self, candidate_data):
+        """CRITICAL FIX: Safely add ICE candidates with proper timing"""
+        try:
+            if not self.remote_description_set:
+                # Queue the candidate for later processing
+                self.pending_ice_candidates.append(candidate_data)
+                logger.info(f"🧊 Queued ICE candidate (waiting for remote description)")
+                return
+            
+            # Create and add the candidate
+            candidate = RTCIceCandidate(
+                component=candidate_data.get("component", 1),
+                foundation=candidate_data.get("foundation", ""),
+                ip=candidate_data.get("address", ""),
+                port=candidate_data.get("port", 0),
+                priority=candidate_data.get("priority", 0),
+                protocol=candidate_data.get("protocol", "udp"),
+                type=candidate_data.get("type", "host"),
+                sdpMid=candidate_data.get("sdpMid"),
+                sdpMLineIndex=candidate_data.get("sdpMLineIndex")
+            )
+            
+            await self.pc.addIceCandidate(candidate)
+            logger.info(f"✅ Added ICE candidate: {candidate.type}")
+            
+        except Exception as e:
+            logger.error(f"❌ Failed to add ICE candidate: {e}")
+    
+    async def set_remote_description_and_process_candidates(self, sdp, type):
+        """CRITICAL FIX: Set remote description and process queued candidates"""
+        try:
+            # FIXED: Create RTCSessionDescription with proper parameters
+            description = RTCSessionDescription(sdp=sdp, type=type)
+            await self.pc.setRemoteDescription(description)
+            
+            self.remote_description_set = True
+            logger.info("✅ Remote description set successfully")
+            
+            # Process any queued ICE candidates
+            if self.pending_ice_candidates:
+                logger.info(f"🧊 Processing {len(self.pending_ice_candidates)} queued ICE candidates")
+                for candidate_data in self.pending_ice_candidates:
+                    await self.add_ice_candidate_safe(candidate_data)
+                self.pending_ice_candidates.clear()
+                
+        except Exception as e:
+            logger.error(f"❌ Error setting remote description: {e}")
+            raise
 
 def is_valid_ice_candidate(candidate_data):
     """Filter out empty candidates with enhanced validation"""
@@ -542,10 +578,10 @@ def is_valid_ice_candidate(candidate_data):
         logger.debug(f"ICE candidate validation error: {e}")
         return False
 
-# WebSocket handler with enhanced error handling
+# WebSocket handler with CRITICAL FIXES
 async def websocket_handler(request):
     """Handle WebSocket connections with comprehensive error handling"""
-    ws = web.WebSocketResponse(heartbeat=30)  # Add heartbeat
+    ws = web.WebSocketResponse(heartbeat=30)
     await ws.prepare(request)
     
     connection_id = id(ws)
@@ -563,10 +599,10 @@ async def websocket_handler(request):
                     if data["type"] == "offer":
                         logger.info("📨 Received WebRTC offer")
                         
-                        # Handle WebRTC offer
-                        await pc.setRemoteDescription(RTCSessionDescription(
-                            sdp=data["sdp"], type=data["type"]
-                        ))
+                        # CRITICAL FIX: Handle WebRTC offer with proper error handling
+                        await webrtc_connection.set_remote_description_and_process_candidates(
+                            data["sdp"], data["type"]
+                        )
                         
                         # Add audio track
                         pc.addTrack(webrtc_connection.audio_track)
@@ -597,23 +633,8 @@ async def websocket_handler(request):
                         if not is_valid_ice_candidate(candidate_data):
                             continue
                         
-                        try:
-                            candidate = RTCIceCandidate(
-                                component=candidate_data.get("component", 1),
-                                foundation=candidate_data.get("foundation", ""),
-                                ip=candidate_data.get("address", ""),
-                                port=candidate_data.get("port", 0),
-                                priority=candidate_data.get("priority", 0),
-                                protocol=candidate_data.get("protocol", "udp"),
-                                type=candidate_data.get("type", "host"),
-                                sdpMid=candidate_data.get("sdpMid"),
-                                sdpMLineIndex=candidate_data.get("sdpMLineIndex")
-                            )
-                            
-                            await pc.addIceCandidate(candidate)
-                            
-                        except Exception as candidate_error:
-                            logger.error(f"❌ Failed to add ICE candidate: {candidate_error}")
+                        # CRITICAL FIX: Use safe ICE candidate handling
+                        await webrtc_connection.add_ice_candidate_safe(candidate_data)
                         
                 except json.JSONDecodeError as e:
                     logger.error(f"❌ JSON decode error: {e}")
@@ -636,12 +657,12 @@ async def websocket_handler(request):
     
     return ws
 
-# Enhanced HTML client with better debugging and TURN servers
+# HTML client remains the same as previous version
 HTML_CLIENT = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>UltraChat S2S - FIXED v2</title>
+    <title>UltraChat S2S - CRITICAL FIXES</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -753,10 +774,10 @@ HTML_CLIENT = """
 </head>
 <body>
     <div class="container">
-        <h1>🎤 Real-time S2S AI Chat v2</h1>
+        <h1>🎤 Real-time S2S AI Chat - FIXED</h1>
         
         <div class="fix-note">
-            <strong>✅ FIXED v2:</strong> Added TURN servers, enhanced ICE handling, improved audio processing, and better connection monitoring.
+            <strong>✅ CRITICAL FIXES:</strong> Fixed RTCSessionDescription error, ICE candidate timing issues, and WebRTC signaling problems.
         </div>
         
         <div class="controls">
@@ -828,7 +849,7 @@ HTML_CLIENT = """
                         autoGainControl: true,
                         sampleRate: 16000,
                         channelCount: 1,
-                        latency: 0.02  // 20ms latency
+                        latency: 0.02
                     }
                 });
                 
@@ -872,24 +893,12 @@ HTML_CLIENT = """
             try {
                 addDebugMessage('🔧 Setting up WebRTC...');
                 
-                // Enhanced ICE configuration with TURN servers
+                // Simplified ICE configuration
                 peerConnection = new RTCPeerConnection({
                     iceServers: [
                         { urls: 'stun:stun.l.google.com:19302' },
-                        { urls: 'stun:stun1.l.google.com:19302' },
-                        { urls: 'stun:stun2.l.google.com:19302' },
-                        {
-                            urls: 'turn:openrelay.metered.ca:80',
-                            username: 'openrelayproject',
-                            credential: 'openrelayproject'
-                        },
-                        {
-                            urls: 'turn:openrelay.metered.ca:443',
-                            username: 'openrelayproject',
-                            credential: 'openrelayproject'
-                        }
-                    ],
-                    iceCandidatePoolSize: 10
+                        { urls: 'stun:stun1.l.google.com:19302' }
+                    ]
                 });
                 
                 localStream.getTracks().forEach(track => {
@@ -1085,7 +1094,7 @@ async def handle_favicon(request):
 
 async def main():
     """Main function with enhanced error handling"""
-    print("🚀 UltraChat S2S v2 - Starting server...")
+    print("🚀 UltraChat S2S - CRITICAL FIXES - Starting server...")
     
     # Initialize models
     if not initialize_models():
