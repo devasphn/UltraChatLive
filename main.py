@@ -412,31 +412,34 @@ async def websocket_handler(request):
     try:
         async for msg in ws:
             if msg.type == WSMsgType.TEXT:
-                data = json.loads(msg.data)
-                if data["type"] == "offer":
-                    logger.info("📨 Received WebRTC offer")
-                    local_description = await connection.handle_offer(sdp=data["sdp"], type=data["type"])
-                    await ws.send_str(json.dumps({
-                        "type": "answer",
-                        "sdp": local_description.sdp
-                    }))
-                    logger.info("📤 Sent WebRTC answer")
-                
-                # ### <<< THE DEFINITIVE FIX IS HERE >>> ###
-                elif data["type"] == "ice-candidate" and "candidate" in data:
-                    try:
-                        # Use snake_case for Python keywords, taking values from the camelCase JSON
-                        candidate = RTCIceCandidate(
-                            candidate=data.get("candidate"),
-                            sdp_mid=data.get("sdpMid"),
-                            sdp_mline_index=data.get("sdpMLineIndex"),
-                        )
-                        await connection.pc.addIceCandidate(candidate)
-                        logger.debug(f"✅ Added ICE candidate: {data.get('candidate')[:30]}...")
-                    except Exception as e:
-                        # This log will now be much more informative if an error still occurs.
-                        logger.error(f"❌ Error adding ICE candidate. Data: {data}. Error: {e}", exc_info=True)
-                # ### <<< END OF THE DEFINITIVE FIX >>> ###
+                try:
+                    data = json.loads(msg.data)
+                    if data["type"] == "offer":
+                        logger.info("📨 Received WebRTC offer")
+                        local_description = await connection.handle_offer(sdp=data["sdp"], type=data["type"])
+                        await ws.send_str(json.dumps({
+                            "type": "answer",
+                            "sdp": local_description.sdp
+                        }))
+                        logger.info("📤 Sent WebRTC answer")
+                    
+                    elif data["type"] == "ice-candidate" and "candidate" in data:
+                        try:
+                            # Use snake_case for Python keywords, taking values from the camelCase JSON
+                            candidate = RTCIceCandidate(
+                                candidate=data.get("candidate"),
+                                sdp_mid=data.get("sdpMid"),
+                                sdp_mline_index=data.get("sdpMLineIndex"),
+                            )
+                            await connection.pc.addIceCandidate(candidate)
+                            logger.debug(f"✅ Added ICE candidate: {data.get('candidate')[:30]}...")
+                        except Exception as e:
+                            logger.error(f"❌ Error adding ICE candidate. Data: {data}. Error: {e}", exc_info=True)
+                except json.JSONDecodeError:
+                    logger.error("❌ Received invalid JSON message.")
+                except Exception as e:
+                    # Catch any other errors during message processing
+                    logger.error(f"❌ Error processing message: {e}", exc_info=True)
 
             elif msg.type == WSMsgType.ERROR:
                 logger.error(f'❌ WebSocket error: {ws.exception()}')
@@ -447,12 +450,12 @@ async def websocket_handler(request):
         logger.info(f"🔌 Closed WebSocket connection: {connection_id}")
     return ws
 
-# The JavaScript client from the previous version was correct. No changes needed there.
+
 HTML_CLIENT = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>UltraChat S2S - DEFINITIVE FIX</title>
+    <title>UltraChat S2S - FINAL FIX</title>
     <style>
         body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; min-height: 100vh; }
         .container { background: rgba(255, 255, 255, 0.1); border-radius: 20px; padding: 30px; backdrop-filter: blur(10px); box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1); }
@@ -474,7 +477,7 @@ HTML_CLIENT = """
 </head>
 <body>
     <div class="container">
-        <h1>🎤 Real-time S2S AI Chat - DEFINITIVE FIX</h1>
+        <h1>🎤 Real-time S2S AI Chat - FINAL FIX</h1>
         <div class="fix-note">
             <strong>✅ Definitive Fix Applied:</strong> This version corrects the ICE candidate format mismatch between the browser and the Python server, ensuring a stable WebRTC connection.
         </div>
@@ -510,7 +513,7 @@ HTML_CLIENT = """
             const timestamp = new Date().toLocaleTimeString();
             debugInfo.innerHTML += `[${timestamp}] ${message}<br>`;
             debugInfo.scrollTop = debugInfo.scrollHeight;
-            console.log(message);
+            console.log(message); // Also log to browser console for easier inspection
         }
         
         function updateConnectionInfo(info) {
@@ -524,63 +527,69 @@ HTML_CLIENT = """
         }
         
         async function startConversation() {
+            addDebugMessage('🚀 startConversation() called');
             try {
                 connectionStartTime = Date.now();
                 updateStatus('🔄 Connecting...', '');
-                addDebugMessage('🚀 Starting conversation...');
+                addDebugMessage('🚶 Attempting to get user media...');
                 
                 localStream = await navigator.mediaDevices.getUserMedia({
                     audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true, sampleRate: 16000, channelCount: 1, latency: 0.02 }
                 });
                 
-                addDebugMessage('🎤 Microphone access granted');
+                addDebugMessage('✅ Microphone access granted successfully');
                 setupAudioVisualization();
                 
+                addDebugMessage('🔗 Establishing WebSocket connection...');
                 const wsUrl = getWebSocketUrl();
-                addDebugMessage(`🔗 Connecting to: ${wsUrl}`);
                 websocket = new WebSocket(wsUrl);
                 
                 websocket.onopen = () => {
-                    updateStatus('🔄 Connected - Setting up audio...', 'connected');
+                    updateStatus('✅ WebSocket Connected', 'connected');
                     updateConnectionInfo('WebSocket: Connected');
-                    addDebugMessage('✅ WebSocket connected');
-                    setupWebRTC();
+                    addDebugMessage('✅ WebSocket onopen event fired');
+                    setupWebRTC(); // Proceed to WebRTC setup only after WebSocket is open
                 };
                 
                 websocket.onmessage = handleSignalingMessage;
+                
                 websocket.onerror = (error) => {
-                    updateStatus('❌ Connection error', 'error');
+                    updateStatus('❌ WebSocket Error', 'error');
                     updateConnectionInfo('WebSocket: Error');
-                    addDebugMessage(`❌ WebSocket error: ${error}`);
+                    addDebugMessage(`❌ WebSocket onerror event: ${error}`);
                 };
                 
                 websocket.onclose = (event) => {
-                    updateStatus('🔌 Connection closed', 'error');
+                    updateStatus(`🔌 WebSocket Closed (${event.code})`, 'error');
                     updateConnectionInfo(`WebSocket: Closed (${event.code})`);
-                    addDebugMessage(`🔌 WebSocket closed: ${event.code} - ${event.reason}`);
-                    stopConversation(false); // Clean up without re-closing
+                    addDebugMessage(`🔌 WebSocket onclose event: Code=${event.code}, Reason=${event.reason}`);
+                    stopConversation(false); // Clean up but don't try to close WebSocket again
                 };
                 
                 startBtn.disabled = true;
                 stopBtn.disabled = false;
                 
             } catch (error) {
-                updateStatus('❌ Error: ' + error.message, 'error');
-                addDebugMessage(`❌ Error starting conversation: ${error.message}`);
+                updateStatus('❌ Error starting: ' + error.message, 'error');
+                addDebugMessage(`❌ Error in startConversation(): ${error.message}`);
+                console.error("Full error in startConversation:", error); // Log full error to browser console
+                // Ensure buttons are reset if an error occurs early
+                startBtn.disabled = false;
+                stopBtn.disabled = true;
             }
         }
         
         async function setupWebRTC() {
+            addDebugMessage('🔧 setupWebRTC() called');
             try {
-                addDebugMessage('🔧 Setting up WebRTC...');
-                
                 peerConnection = new RTCPeerConnection({
                     iceServers: [ { urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' } ]
                 });
+                addDebugMessage('✅ RTCPeerConnection created');
                 
                 localStream.getTracks().forEach(track => {
                     peerConnection.addTrack(track, localStream);
-                    addDebugMessage(`📡 Added ${track.kind} track`);
+                    addDebugMessage(`📡 Added ${track.kind} track to PeerConnection`);
                 });
                 
                 peerConnection.ontrack = (event) => {
@@ -590,9 +599,9 @@ HTML_CLIENT = """
                 };
                 
                 peerConnection.onicecandidate = (event) => {
+                    addDebugMessage('Candidate event fired');
                     if (event.candidate && websocket && websocket.readyState === WebSocket.OPEN) {
-                        // This sends a flat JSON object that matches what the Python server now expects.
-                        // This is the most reliable way to handle ICE candidates.
+                        // Send a flat JSON object that matches what the Python server expects.
                         websocket.send(JSON.stringify({
                             type: 'ice-candidate',
                             candidate: event.candidate.candidate,
@@ -600,13 +609,15 @@ HTML_CLIENT = """
                             sdpMLineIndex: event.candidate.sdpMLineIndex,
                         }));
                         addDebugMessage(`📤 Sent ICE candidate: ${event.candidate.type}`);
+                    } else {
+                         addDebugMessage('No candidate or WebSocket not open, skipping send.');
                     }
                 };
                 
                 peerConnection.oniceconnectionstatechange = () => {
                     const state = peerConnection.iceConnectionState;
                     updateConnectionInfo(`ICE: ${state}`);
-                    addDebugMessage(`🧊 ICE connection state: ${state}`);
+                    addDebugMessage(`🧊 ICE connection state changed: ${state}`);
                     
                     if (state === 'connected' || state === 'completed') {
                         const duration = Date.now() - connectionStartTime;
@@ -618,79 +629,149 @@ HTML_CLIENT = """
                     }
                 };
                 
-                const offer = await peerConnection.createOffer();
-                await peerConnection.setLocalDescription(offer);
+                peerConnection.onconnectionstatechange = () => {
+                    addDebugMessage(`🔗 PeerConnection state changed: ${peerConnection.connectionState}`);
+                }
                 
+                addDebugMessage('➡️ Creating WebRTC offer...');
+                const offer = await peerConnection.createOffer();
+                addDebugMessage('✅ Offer created');
+                await peerConnection.setLocalDescription(offer);
+                addDebugMessage('✅ Local description set');
+                
+                addDebugMessage('📤 Sending WebRTC offer via WebSocket...');
                 if (websocket && websocket.readyState === WebSocket.OPEN) {
                     websocket.send(JSON.stringify({
                         type: 'offer',
                         sdp: offer.sdp
                     }));
-                    addDebugMessage('📤 Sent WebRTC offer');
+                    addDebugMessage('✅ WebRTC offer sent');
+                } else {
+                    addDebugMessage('❌ WebSocket not open, cannot send offer.');
                 }
                 
             } catch (error) {
                 updateStatus('❌ WebRTC setup error: ' + error.message, 'error');
-                addDebugMessage(`❌ WebRTC error: ${error.message}`);
+                addDebugMessage(`❌ Error in setupWebRTC(): ${error.message}`);
+                console.error("Full error in setupWebRTC:", error); // Log full error to browser console
             }
         }
         
         async function handleSignalingMessage(event) {
+            addDebugMessage('📥 handleSignalingMessage() called');
             try {
-                const message = JSON.parse(event..data);
-                addDebugMessage(`📥 Received: ${message.type}`);
-                if (!peerConnection) return;
+                const message = JSON.parse(event.data);
+                addDebugMessage(`📥 Received signaling message: ${message.type}`);
+                
+                if (!peerConnection) {
+                    addDebugMessage('❌ PeerConnection not initialized, cannot process message.');
+                    return;
+                }
+
                 if (message.type === 'answer') {
+                    addDebugMessage('✅ Processing incoming answer');
                     await peerConnection.setRemoteDescription(new RTCSessionDescription(message));
-                    addDebugMessage('✅ Set remote description from answer');
+                    addDebugMessage('✅ Remote description set from answer');
                 } else if (message.type === 'ice-candidate') {
-                    // This part of the client doesn't need to do anything, as it only sends candidates.
+                    // Client only sends candidates, server processes them.
+                    // We don't expect 'ice-candidate' messages from the server in this setup.
+                    addDebugMessage('ℹ️ Received ICE candidate message from server (unexpected in this flow).');
                 }
             } catch (error) {
-                addDebugMessage(`❌ Error handling signaling: ${error.message}`);
+                addDebugMessage(`❌ Error handling signaling message: ${error.message}`);
+                console.error("Full error in handleSignalingMessage:", error); // Log full error to browser console
             }
         }
         
         function setupAudioVisualization() {
-            audioContext = new (window.AudioContext || window.webkitAudioContext)();
-            analyser = audioContext.createAnalyser();
-            const source = audioContext.createMediaStreamSource(localStream);
-            source.connect(analyser);
-            analyser.fftSize = 256;
-            const bufferLength = analyser.frequencyBinCount;
-            const dataArray = new Uint8Array(bufferLength);
-            let lastSpeechTime = 0;
-            function updateVisualization() {
-                if (!analyser) return;
-                analyser.getByteFrequencyData(dataArray);
-                const average = dataArray.reduce((a, b) => a + b) / bufferLength;
-                visualizer.style.background = `linear-gradient(90deg, rgba(76, 175, 80, ${average / 255}) 0%, rgba(33, 150, 243, ${average / 255}) 100%)`;
-                if (average > 20) { visualizer.textContent = '🎤 Speaking...'; lastSpeechTime = Date.now(); } else if (Date.now() - lastSpeechTime < 3000) { visualizer.textContent = '🎧 Processing...'; } else { visualizer.textContent = '👂 Listening...'; }
-                requestAnimationFrame(updateVisualization);
+            addDebugMessage('🎨 Setting up audio visualization...');
+            try {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                analyser = audioContext.createAnalyser();
+                const source = audioContext.createMediaStreamSource(localStream);
+                source.connect(analyser);
+                analyser.fftSize = 256;
+                const bufferLength = analyser.frequencyBinCount;
+                const dataArray = new Uint8Array(bufferLength);
+                let lastSpeechTime = 0;
+                
+                function updateVisualization() {
+                    if (!analyser) return;
+                    analyser.getByteFrequencyData(dataArray);
+                    const average = dataArray.reduce((a, b) => a + b) / bufferLength;
+                    visualizer.style.background = `linear-gradient(90deg, rgba(76, 175, 80, ${average / 255}) 0%, rgba(33, 150, 243, ${average / 255}) 100%)`;
+                    if (average > 20) { visualizer.textContent = '🎤 Speaking...'; lastSpeechTime = Date.now(); } else if (Date.now() - lastSpeechTime < 3000) { visualizer.textContent = '🎧 Processing...'; } else { visualizer.textContent = '👂 Listening...'; }
+                    requestAnimationFrame(updateVisualization);
+                }
+                updateVisualization();
+                addDebugMessage('✅ Audio visualization setup complete');
+            } catch (error) {
+                addDebugMessage(`❌ Error setting up audio visualization: ${error.message}`);
+                console.error("Full error in setupAudioVisualization:", error);
             }
-            updateVisualization();
         }
         
         function playAudio(remoteStream) {
-            const audio = new Audio();
-            audio.srcObject = remoteStream;
-            audio.autoplay = true;
-            audio.play().then(() => { addDebugMessage('🔊 Playing AI response stream'); }).catch(error => { addDebugMessage(`❌ Audio playback error: ${error.message}`); document.body.addEventListener('click', () => audio.play(), { once: true }); updateStatus('Click anywhere to enable audio playback!', 'error'); });
+            addDebugMessage('🔊 Attempting to play remote audio stream...');
+            try {
+                const audio = new Audio();
+                audio.srcObject = remoteStream;
+                audio.autoplay = true;
+                audio.play().then(() => { 
+                    addDebugMessage('✅ Audio playback started successfully'); 
+                }).catch(error => { 
+                    addDebugMessage(`❌ Audio playback error: ${error.message}`);
+                    console.error("Error during audio.play():", error);
+                    // Attempt to recover with a user gesture
+                    document.body.addEventListener('click', () => {
+                        addDebugMessage('Attempting to play audio after user click...');
+                        audio.play().then(() => addDebugMessage('✅ Audio playback resumed after user click')).catch(resumeError => addDebugMessage(`❌ Failed to resume audio playback after click: ${resumeError.message}`));
+                    }, { once: true });
+                    updateStatus('Click anywhere to enable audio playback!', 'error');
+                });
+            } catch (error) {
+                addDebugMessage(`❌ Exception during playAudio setup: ${error.message}`);
+                console.error("Full error in playAudio:", error);
+            }
         }
         
         function stopConversation(closeWs = true) {
-            addDebugMessage('🛑 Conversation stopping...');
-            if (closeWs && websocket) { websocket.close(); }
+            addDebugMessage('🛑 stopConversation() called');
+            if (closeWs && websocket && websocket.readyState === WebSocket.OPEN) {
+                addDebugMessage('➡️ Closing WebSocket...');
+                websocket.close();
+            } else {
+                addDebugMessage('ℹ️ WebSocket not open or closeWs is false, skipping close.');
+            }
             websocket = null;
-            if (peerConnection) { peerConnection.close(); peerConnection = null; }
-            if (localStream) { localStream.getTracks().forEach(track => track.stop()); localStream = null; }
-            if (audioContext) { audioContext.close().catch(e => {}); audioContext = null; analyser = null; }
+            
+            if (peerConnection) {
+                addDebugMessage('➡️ Closing PeerConnection...');
+                peerConnection.close();
+                peerConnection = null;
+            }
+            
+            if (localStream) {
+                addDebugMessage('➡️ Stopping local media tracks...');
+                localStream.getTracks().forEach(track => track.stop());
+                localStream = null;
+            }
+            
+            if (audioContext) {
+                addDebugMessage('➡️ Closing AudioContext...');
+                audioContext.close().catch(e => addDebugMessage(`⚠️ Error closing AudioContext: ${e.message}`));
+                audioContext = null;
+                analyser = null;
+            }
+            
             updateStatus('🔌 Disconnected', '');
             updateConnectionInfo('Connection Status: Disconnected');
             startBtn.disabled = false;
             stopBtn.disabled = true;
+            
             visualizer.style.background = 'rgba(255, 255, 255, 0.1)';
             visualizer.textContent = 'Waiting to start...';
+            addDebugMessage('✅ stopConversation() finished');
         }
         
         function updateStatus(message, className) {
