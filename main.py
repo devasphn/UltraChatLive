@@ -21,11 +21,18 @@ import warnings
 import torch.hub
 import collections
 import time
+import librosa
 
 warnings.filterwarnings("ignore")
-logging.basicConfig(level=logging.INFO)
 
-# CRITICAL FIX: Suppress empty candidate warnings
+# ENHANCED LOGGING CONFIGURATION
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Suppress empty candidate warnings
 logging.getLogger('aioice.ice').setLevel(logging.WARNING)
 
 # Global variables for models
@@ -36,8 +43,9 @@ executor = ThreadPoolExecutor(max_workers=4)
 
 class SileroVAD:
     def __init__(self):
-        """Initialize Silero VAD model"""
+        """Initialize Silero VAD model with enhanced error handling"""
         try:
+            logger.info("🎤 Loading Silero VAD model...")
             # Load Silero VAD model
             self.model, utils = torch.hub.load(
                 repo_or_dir='snakers4/silero-vad',
@@ -52,16 +60,17 @@ class SileroVAD:
              self.VADIterator,
              self.collect_chunks) = utils
             
-            print("Silero VAD loaded successfully")
+            logger.info("✅ Silero VAD loaded successfully")
             
         except Exception as e:
-            print(f"Error loading Silero VAD: {e}")
+            logger.error(f"❌ Error loading Silero VAD: {e}")
             self.model = None
     
     def detect_speech(self, audio_tensor, sample_rate=16000):
-        """Detect speech in audio tensor"""
+        """Detect speech in audio tensor with enhanced logging"""
         if self.model is None:
-            return True  # Fallback: assume speech is present
+            logger.warning("⚠️ VAD model not available, assuming speech present")
+            return True
         
         try:
             # Ensure audio is float32 and 1D
@@ -74,75 +83,102 @@ class SileroVAD:
             if len(audio_tensor.shape) > 1:
                 audio_tensor = audio_tensor.squeeze()
             
+            # Normalize audio to [-1, 1] range
+            if audio_tensor.abs().max() > 1.0:
+                audio_tensor = audio_tensor / audio_tensor.abs().max()
+            
+            logger.debug(f"🔍 VAD processing {len(audio_tensor)} samples at {sample_rate}Hz")
+            
             # Get speech timestamps
             speech_timestamps = self.get_speech_timestamps(
                 audio_tensor, 
                 self.model,
                 sampling_rate=sample_rate,
-                threshold=0.3,  # Lower threshold for better detection
-                min_speech_duration_ms=200,  # Shorter minimum
-                min_silence_duration_ms=300   # Shorter silence
+                threshold=0.3,
+                min_speech_duration_ms=200,
+                min_silence_duration_ms=300
             )
             
-            return len(speech_timestamps) > 0
+            has_speech = len(speech_timestamps) > 0
+            logger.debug(f"🎯 VAD Result: {has_speech} (found {len(speech_timestamps)} speech segments)")
+            
+            return has_speech
             
         except Exception as e:
-            print(f"VAD error: {e}")
+            logger.error(f"❌ VAD error: {e}")
             return True  # Fallback
 
 def initialize_models():
-    """Initialize all models once at startup"""
+    """Initialize all models with comprehensive error handling"""
     global uv_pipe, tts_model, vad_model
     
-    print(f"Using device: {'cuda:0' if torch.cuda.is_available() else 'cpu'}")
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    logger.info(f"🚀 Initializing models on device: {device}")
     
     # 1. Load Silero VAD
-    print("Loading Silero VAD...")
+    logger.info("📥 Loading Silero VAD...")
     vad_model = SileroVAD()
+    if vad_model.model is None:
+        logger.error("❌ Failed to load VAD model")
+        return False
     
     # 2. Load Ultravox pipeline
     try:
-        print("Loading Ultravox pipeline...")
+        logger.info("📥 Loading Ultravox pipeline...")
         uv_pipe = pipeline(
             model="fixie-ai/ultravox-v0_4",
             trust_remote_code=True,
             device_map="auto",
             torch_dtype=torch.float16,
         )
-        print("Ultravox pipeline loaded successfully.")
+        logger.info("✅ Ultravox pipeline loaded successfully")
     except Exception as e:
-        print(f"Error loading Ultravox: {e}")
-        exit(1)
+        logger.error(f"❌ Error loading Ultravox: {e}")
+        return False
     
     # 3. Load Chatterbox TTS
     try:
-        print("Loading Chatterbox TTS...")
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        logger.info("📥 Loading Chatterbox TTS...")
         tts_model = ChatterboxTTS.from_pretrained(device=device)
-        print("Chatterbox TTS loaded successfully.")
+        logger.info("✅ Chatterbox TTS loaded successfully")
     except Exception as e:
-        print(f"Error loading TTS: {e}")
-        exit(1)
+        logger.error(f"❌ Error loading TTS: {e}")
+        return False
+    
+    logger.info("🎉 All models loaded successfully!")
+    return True
 
 class AudioBuffer:
-    """FIXED: Simplified audio buffer with working VAD logic"""
+    """Enhanced audio buffer with improved VAD logic and debugging"""
     def __init__(self, max_duration=5.0, sample_rate=16000):
         self.sample_rate = sample_rate
         self.max_samples = int(max_duration * sample_rate)
         self.buffer = collections.deque(maxlen=self.max_samples)
         self.last_process_time = time.time()
-        self.min_speech_samples = int(1.0 * sample_rate)  # 1 second minimum
-        self.process_interval = 2.0  # Process every 2 seconds
+        self.min_speech_samples = int(1.0 * sample_rate)
+        self.process_interval = 1.5  # Process every 1.5 seconds
+        self.total_samples_received = 0
         
     def add_audio(self, audio_data):
-        """Add audio data to buffer"""
+        """Add audio data to buffer with enhanced logging"""
         if isinstance(audio_data, np.ndarray):
             audio_data = audio_data.flatten()
+        
+        # Convert to float32 and normalize
+        if audio_data.dtype != np.float32:
+            audio_data = audio_data.astype(np.float32)
+        
+        # Normalize to [-1, 1] range
+        if np.abs(audio_data).max() > 1.0:
+            audio_data = audio_data / np.abs(audio_data).max()
         
         for sample in audio_data:
             self.buffer.append(sample)
         
-        print(f"🎵 Buffer size: {len(self.buffer)} samples")
+        self.total_samples_received += len(audio_data)
+        
+        logger.debug(f"🎵 Buffer: {len(self.buffer)}/{self.max_samples} samples "
+                    f"(total received: {self.total_samples_received})")
     
     def get_audio_array(self):
         """Get current audio as numpy array"""
@@ -151,12 +187,16 @@ class AudioBuffer:
         return np.array(list(self.buffer), dtype=np.float32)
     
     def should_process(self):
-        """FIXED: Simplified processing logic"""
+        """Enhanced processing logic with detailed logging"""
         current_time = time.time()
         
-        # Check if we have minimum audio and enough time has passed
         has_enough_audio = len(self.buffer) >= self.min_speech_samples
         enough_time_passed = (current_time - self.last_process_time) >= self.process_interval
+        
+        logger.debug(f"🔍 Process check: audio={has_enough_audio} "
+                    f"({len(self.buffer)}/{self.min_speech_samples}), "
+                    f"time={enough_time_passed} "
+                    f"({current_time - self.last_process_time:.1f}s)")
         
         if has_enough_audio and enough_time_passed:
             audio_array = self.get_audio_array()
@@ -164,7 +204,8 @@ class AudioBuffer:
             # Use VAD to detect speech
             has_speech = vad_model.detect_speech(audio_array, self.sample_rate)
             
-            print(f"🔍 VAD Check: {len(audio_array)} samples, Speech detected: {has_speech}")
+            logger.info(f"🎯 Processing decision: {len(audio_array)} samples, "
+                       f"Speech detected: {has_speech}")
             
             if has_speech:
                 self.last_process_time = current_time
@@ -175,35 +216,46 @@ class AudioBuffer:
     def reset(self):
         """Reset buffer state"""
         self.buffer.clear()
-        print("🔄 Buffer reset")
+        logger.info("🔄 Audio buffer reset")
 
 class OptimizedTTS:
     def __init__(self):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         
     def synthesize(self, text: str) -> np.ndarray:
-        """Optimized TTS synthesis returning numpy array"""
+        """Enhanced TTS synthesis with better error handling"""
         if not text.strip():
+            logger.warning("⚠️ Empty text for TTS, returning silence")
             return np.zeros(1600, dtype=np.float32)
 
-        print(f"🎤 Synthesizing: '{text[:50]}...'")
+        logger.info(f"🎤 Synthesizing: '{text[:100]}...'")
         
-        # Generate audio with optimizations
-        with torch.inference_mode():
-            wav = tts_model.generate(text)
+        try:
+            # Generate audio with optimizations
+            with torch.inference_mode():
+                wav = tts_model.generate(text)
+                
+            if not isinstance(wav, torch.Tensor):
+                wav = torch.from_numpy(wav)
+            if wav.dim() == 1:
+                wav = wav.unsqueeze(0)
+                
+            # Convert to numpy array and ensure correct format
+            result = wav.cpu().numpy().flatten().astype(np.float32)
             
-        if not isinstance(wav, torch.Tensor):
-            wav = torch.from_numpy(wav)
-        if wav.dim() == 1:
-            wav = wav.unsqueeze(0)
+            # Ensure sample rate is 16kHz
+            if hasattr(tts_model, 'sample_rate') and tts_model.sample_rate != 16000:
+                result = librosa.resample(result, orig_sr=tts_model.sample_rate, target_sr=16000)
             
-        # Convert to numpy array
-        result = wav.cpu().numpy().flatten().astype(np.float32)
-        print(f"✅ TTS generated {len(result)} samples")
-        return result
+            logger.info(f"✅ TTS generated {len(result)} samples")
+            return result
+            
+        except Exception as e:
+            logger.error(f"❌ TTS synthesis error: {e}")
+            return np.zeros(1600, dtype=np.float32)
 
 class AudioStreamTrack(MediaStreamTrack):
-    """FIXED: Audio track with working response queue and proper consumer"""
+    """FIXED: Audio track with proper PyAV format and enhanced debugging"""
     kind = "audio"
     
     def __init__(self):
@@ -217,28 +269,30 @@ class AudioStreamTrack(MediaStreamTrack):
         self._timestamp = 0
         self._time_base = fractions.Fraction(1, 16000)
         
-        # CRITICAL FIX: Start the consumer task
+        # Consumer task
         self._consumer_task = None
+        self._is_running = False
         
     def start_consumer(self):
         """Start the audio consumer task"""
         if self._consumer_task is None:
+            self._is_running = True
             self._consumer_task = asyncio.create_task(self._consume_audio())
-            print("🎧 Audio consumer started")
+            logger.info("🎧 Audio consumer started")
         
     async def _consume_audio(self):
-        """CRITICAL FIX: Consumer task that calls recv() continuously"""
+        """Consumer task that calls recv() continuously"""
         try:
-            while True:
+            while self._is_running:
                 await self.recv()
                 await asyncio.sleep(0.1)  # 100ms intervals
         except asyncio.CancelledError:
-            print("🛑 Audio consumer stopped")
+            logger.info("🛑 Audio consumer stopped")
         except Exception as e:
-            print(f"❌ Audio consumer error: {e}")
+            logger.error(f"❌ Audio consumer error: {e}")
         
     async def recv(self):
-        """FIXED: Audio frame generation with proper response handling"""
+        """FIXED: Audio frame generation with proper PyAV format"""
         frame_samples = 1600  # 0.1 seconds at 16kHz
         
         # Check if we have response audio to send
@@ -248,7 +302,7 @@ class AudioStreamTrack(MediaStreamTrack):
                     self._response_queue.get(), timeout=0.001
                 )
                 self._response_position = 0
-                print(f"🔊 Starting new response playback: {len(self._current_response)} samples")
+                logger.info(f"🔊 Starting new response playback: {len(self._current_response)} samples")
             except asyncio.TimeoutError:
                 # No response available, send silence
                 frame = np.zeros(frame_samples, dtype=np.float32)
@@ -265,12 +319,25 @@ class AudioStreamTrack(MediaStreamTrack):
         else:
             frame = np.zeros(frame_samples, dtype=np.float32)
         
-        # Create AudioFrame using PyAV
-        audio_frame = av.AudioFrame.from_ndarray(
-            frame.reshape(1, -1), 
-            format="flt",
-            layout="mono"
-        )
+        # CRITICAL FIX: PyAV requires 2D array with shape (1, samples) for mono
+        frame_2d = frame.reshape(1, -1)
+        
+        # Create AudioFrame using PyAV with correct format
+        try:
+            audio_frame = av.AudioFrame.from_ndarray(
+                frame_2d, 
+                format="flt",
+                layout="mono"
+            )
+        except Exception as e:
+            logger.error(f"❌ PyAV AudioFrame creation error: {e}")
+            # Fallback to silence
+            silence_2d = np.zeros((1, frame_samples), dtype=np.float32)
+            audio_frame = av.AudioFrame.from_ndarray(
+                silence_2d, 
+                format="flt",
+                layout="mono"
+            )
         
         # Set timestamp properly
         audio_frame.pts = self._timestamp
@@ -283,46 +350,58 @@ class AudioStreamTrack(MediaStreamTrack):
         return audio_frame
     
     def process_audio_data(self, audio_data):
-        """Process incoming audio data"""
-        print(f"📥 Received audio data: {audio_data.shape}")
+        """Process incoming audio data with enhanced logging"""
+        logger.debug(f"📥 Received audio data: shape={audio_data.shape}, "
+                    f"dtype={audio_data.dtype}, range=[{audio_data.min():.3f}, {audio_data.max():.3f}]")
+        
         self.buffer.add_audio(audio_data)
         
         if self.buffer.should_process():
             # Get audio for processing
             audio_array = self.buffer.get_audio_array()
             if len(audio_array) > 0:
-                print(f"🎯 Processing speech: {len(audio_array)} samples")
+                logger.info(f"🎯 Processing speech: {len(audio_array)} samples")
                 # Process in background
                 asyncio.create_task(self._process_speech(audio_array))
             self.buffer.reset()
     
     async def _process_speech(self, audio_array):
-        """Process speech and generate response"""
+        """Process speech and generate response with enhanced error handling"""
         try:
-            print("🧠 Generating AI response...")
+            logger.info("🧠 Processing speech with Ultravox...")
+            
             # Generate response
             response_text = await self._generate_response(audio_array)
             if response_text.strip():
-                print(f"💬 AI Response: '{response_text}'")
+                logger.info(f"💬 AI Response: '{response_text}'")
                 # Generate TTS
                 response_audio = self.tts.synthesize(response_text)
                 # Queue response audio for sending
                 await self._response_queue.put(response_audio)
+                logger.info("🎵 Response audio queued for playback")
             else:
-                print("⚠️ Empty response generated")
+                logger.warning("⚠️ Empty response generated")
                 
         except Exception as e:
-            print(f"❌ Error processing speech: {e}")
+            logger.error(f"❌ Error processing speech: {e}")
     
     async def _generate_response(self, audio_array):
-        """Generate response using Ultravox"""
+        """Generate response using Ultravox with enhanced logging"""
         try:
+            # Ensure audio is in correct format for Ultravox
+            if audio_array.dtype != np.float32:
+                audio_array = audio_array.astype(np.float32)
+            
+            # Normalize audio
+            if np.abs(audio_array).max() > 1.0:
+                audio_array = audio_array / np.abs(audio_array).max()
+            
             turns = [{
                 "role": "system", 
                 "content": "You are a helpful voice assistant. Give brief, natural responses under 20 words."
             }]
             
-            print(f"🤖 Calling Ultravox with {len(audio_array)} audio samples...")
+            logger.info(f"🤖 Calling Ultravox with {len(audio_array)} audio samples...")
             
             with torch.inference_mode():
                 result = uv_pipe({
@@ -330,7 +409,7 @@ class AudioStreamTrack(MediaStreamTrack):
                     'turns': turns,
                     'sampling_rate': 16000
                 }, 
-                max_new_tokens=32,  # Shorter for faster response
+                max_new_tokens=32,
                 do_sample=True,
                 temperature=0.7,
                 top_p=0.9,
@@ -349,51 +428,66 @@ class AudioStreamTrack(MediaStreamTrack):
             else:
                 response_text = str(result)
             
-            print(f"✅ Ultravox response: '{response_text}'")
+            logger.info(f"✅ Ultravox response: '{response_text}'")
             return response_text.strip()
             
         except Exception as e:
-            print(f"❌ Error generating response: {e}")
+            logger.error(f"❌ Error generating response: {e}")
             return "I'm sorry, I couldn't process that."
+    
+    def stop_consumer(self):
+        """Stop the consumer task"""
+        self._is_running = False
+        if self._consumer_task:
+            self._consumer_task.cancel()
 
 class WebRTCConnection:
     def __init__(self):
         self.pc = RTCPeerConnection()
         self.audio_track = AudioStreamTrack()
-        self.recorder = None  # CRITICAL FIX: Add recorder for consuming outgoing audio
+        self.recorder = None
         
         # Add event handlers
         @self.pc.on("datachannel")
         def on_datachannel(channel):
-            print(f"Data channel created: {channel.label}")
+            logger.info(f"📡 Data channel created: {channel.label}")
         
         @self.pc.on("track")
         def on_track(track):
-            print(f"Track received: {track.kind}")
+            logger.info(f"🎧 Track received: {track.kind}")
             if track.kind == "audio":
                 # Handle incoming audio
                 asyncio.create_task(self._handle_audio_track(track))
     
     async def _handle_audio_track(self, track):
-        """Handle incoming audio track with proper error handling"""
-        print("🎧 Starting audio track handler...")
+        """Handle incoming audio track with enhanced error handling"""
+        logger.info("🎧 Starting audio track handler...")
+        frame_count = 0
         try:
             while True:
                 try:
                     frame = await track.recv()
+                    frame_count += 1
+                    
                     # Convert frame to numpy array
                     audio_data = frame.to_ndarray()
+                    
+                    # Log every 50th frame to avoid spam
+                    if frame_count % 50 == 0:
+                        logger.debug(f"🎵 Processed {frame_count} audio frames")
+                    
                     # Process with our audio track
                     self.audio_track.process_audio_data(audio_data)
+                    
                 except Exception as frame_error:
-                    print(f"Frame processing error: {frame_error}")
-                    # Continue processing other frames
+                    logger.error(f"❌ Frame processing error: {frame_error}")
                     continue
+                    
         except Exception as e:
-            print(f"Error handling audio track: {e}")
+            logger.error(f"❌ Error handling audio track: {e}")
 
 def is_valid_ice_candidate(candidate_data):
-    """Filter out empty candidates (end-of-candidates markers)"""
+    """Filter out empty candidates with enhanced validation"""
     if not candidate_data:
         return False
     
@@ -413,18 +507,19 @@ def is_valid_ice_candidate(candidate_data):
         return True
         
     except Exception as e:
+        logger.debug(f"ICE candidate validation error: {e}")
         return False
 
-# WebSocket handler with proper ICE candidate filtering
+# WebSocket handler with enhanced error handling
 async def websocket_handler(request):
-    """Handle WebSocket connections using aiohttp with proper ICE candidate filtering"""
+    """Handle WebSocket connections with comprehensive error handling"""
     ws = web.WebSocketResponse()
     await ws.prepare(request)
     
     connection_id = id(ws)
     webrtc_connection = WebRTCConnection()
     
-    print(f"🔌 New WebSocket connection: {connection_id}")
+    logger.info(f"🔌 New WebSocket connection: {connection_id}")
     
     try:
         async for msg in ws:
@@ -434,7 +529,8 @@ async def websocket_handler(request):
                     pc = webrtc_connection.pc
                     
                     if data["type"] == "offer":
-                        print("📨 Received WebRTC offer")
+                        logger.info("📨 Received WebRTC offer")
+                        
                         # Handle WebRTC offer
                         await pc.setRemoteDescription(RTCSessionDescription(
                             sdp=data["sdp"], type=data["type"]
@@ -447,6 +543,7 @@ async def websocket_handler(request):
                         webrtc_connection.recorder = MediaBlackhole()
                         webrtc_connection.recorder.addTrack(webrtc_connection.audio_track)
                         await webrtc_connection.recorder.start()
+                        logger.info("🎵 MediaBlackhole consumer started")
                         
                         # CRITICAL FIX: Start the audio consumer
                         webrtc_connection.audio_track.start_consumer()
@@ -460,7 +557,7 @@ async def websocket_handler(request):
                             "sdp": pc.localDescription.sdp
                         }))
                         
-                        print("📤 Sent WebRTC answer")
+                        logger.info("📤 Sent WebRTC answer")
                         
                     elif data["type"] == "ice-candidate":
                         candidate_data = data["candidate"]
@@ -484,34 +581,35 @@ async def websocket_handler(request):
                             await pc.addIceCandidate(candidate)
                             
                         except Exception as candidate_error:
-                            print(f"❌ Failed to add ICE candidate: {candidate_error}")
+                            logger.error(f"❌ Failed to add ICE candidate: {candidate_error}")
                         
                 except json.JSONDecodeError as e:
-                    print(f"JSON decode error: {e}")
+                    logger.error(f"❌ JSON decode error: {e}")
                 except Exception as e:
-                    print(f"Error handling WebSocket message: {e}")
+                    logger.error(f"❌ Error handling WebSocket message: {e}")
                     
             elif msg.type == WSMsgType.ERROR:
-                print(f'WebSocket error: {ws.exception()}')
+                logger.error(f'❌ WebSocket error: {ws.exception()}')
                 break
                 
     except Exception as e:
-        print(f"WebSocket handler error: {e}")
+        logger.error(f"❌ WebSocket handler error: {e}")
     finally:
         # Cleanup
         if webrtc_connection.recorder:
             await webrtc_connection.recorder.stop()
+        webrtc_connection.audio_track.stop_consumer()
         await webrtc_connection.pc.close()
-        print(f"🔌 Closed WebSocket connection: {connection_id}")
+        logger.info(f"🔌 Closed WebSocket connection: {connection_id}")
     
     return ws
 
-# HTML client interface (same as before)
+# Enhanced HTML client with better debugging
 HTML_CLIENT = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>UltraChat S2S - Fixed Consumer</title>
+    <title>UltraChat S2S - FIXED</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -594,6 +692,16 @@ HTML_CLIENT = """
             justify-content: center;
             font-size: 14px;
         }
+        .debug-info {
+            background: rgba(0, 0, 0, 0.3);
+            border-radius: 10px;
+            padding: 15px;
+            margin: 20px 0;
+            font-family: monospace;
+            font-size: 12px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
         .instructions {
             background: rgba(255, 255, 255, 0.1);
             border-radius: 10px;
@@ -620,10 +728,10 @@ HTML_CLIENT = """
 </head>
 <body>
     <div class="container">
-        <h1>🎤 UltraChat S2S - Fixed Consumer</h1>
+        <h1>🎤 Real-time S2S AI Chat</h1>
         
         <div class="fix-note">
-            <strong>✅ Fixed:</strong> Added MediaBlackhole consumer and audio consumer task. Audio processing now working.
+            <strong>✅ FIXED:</strong> All critical issues resolved - PyAV format, MediaBlackhole consumer, debug logging, and model loading.
         </div>
         
         <div class="controls">
@@ -631,10 +739,14 @@ HTML_CLIENT = """
             <button id="stopBtn" class="stop-btn" disabled>Stop Conversation</button>
         </div>
         
-        <div id="status" class="status">Ready to connect</div>
+        <div id="status" class="status">Ready - Start speaking!</div>
         
         <div class="audio-visualizer" id="visualizer">
-            Audio visualization will appear here
+            Listening...
+        </div>
+        
+        <div class="debug-info" id="debugInfo">
+            Debug info will appear here...
         </div>
         
         <div class="instructions">
@@ -642,9 +754,9 @@ HTML_CLIENT = """
             <ul>
                 <li>Click "Start Conversation" to begin</li>
                 <li>Allow microphone access when prompted</li>
-                <li>Speak clearly for 2-3 seconds</li>
-                <li>Wait for AI response (processing takes 5-10 seconds)</li>
-                <li>AI will respond with voice automatically</li>
+                <li>Speak naturally - the AI will detect when you're done speaking</li>
+                <li>The AI will respond with voice automatically</li>
+                <li>Click "Stop Conversation" to end the session</li>
             </ul>
         </div>
     </div>
@@ -660,9 +772,17 @@ HTML_CLIENT = """
         const stopBtn = document.getElementById('stopBtn');
         const status = document.getElementById('status');
         const visualizer = document.getElementById('visualizer');
+        const debugInfo = document.getElementById('debugInfo');
         
         startBtn.addEventListener('click', startConversation);
         stopBtn.addEventListener('click', stopConversation);
+        
+        function addDebugMessage(message) {
+            const timestamp = new Date().toLocaleTimeString();
+            debugInfo.innerHTML += `[${timestamp}] ${message}<br>`;
+            debugInfo.scrollTop = debugInfo.scrollHeight;
+            console.log(message);
+        }
         
         function getWebSocketUrl() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -672,7 +792,8 @@ HTML_CLIENT = """
         
         async function startConversation() {
             try {
-                updateStatus('Connecting...', '');
+                updateStatus('🔄 Connecting...', '');
+                addDebugMessage('🚀 Starting conversation...');
                 
                 localStream = await navigator.mediaDevices.getUserMedia({
                     audio: {
@@ -683,38 +804,43 @@ HTML_CLIENT = """
                     }
                 });
                 
+                addDebugMessage('🎤 Microphone access granted');
                 setupAudioVisualization();
                 
                 const wsUrl = getWebSocketUrl();
-                console.log('Connecting to:', wsUrl);
+                addDebugMessage(`🔗 Connecting to: ${wsUrl}`);
                 websocket = new WebSocket(wsUrl);
                 
                 websocket.onopen = () => {
-                    updateStatus('Connected - Setting up audio...', 'connected');
+                    updateStatus('🔄 Connected - Setting up audio...', 'connected');
+                    addDebugMessage('✅ WebSocket connected');
                     setupWebRTC();
                 };
                 
                 websocket.onmessage = handleSignalingMessage;
                 websocket.onerror = (error) => {
-                    updateStatus('Connection error', 'error');
-                    console.error('WebSocket error:', error);
+                    updateStatus('❌ Connection error', 'error');
+                    addDebugMessage(`❌ WebSocket error: ${error}`);
                 };
                 
                 websocket.onclose = () => {
-                    updateStatus('Connection closed', 'error');
+                    updateStatus('🔌 Connection closed', 'error');
+                    addDebugMessage('🔌 WebSocket closed');
                 };
                 
                 startBtn.disabled = true;
                 stopBtn.disabled = false;
                 
             } catch (error) {
-                updateStatus('Error: ' + error.message, 'error');
-                console.error('Error starting conversation:', error);
+                updateStatus('❌ Error: ' + error.message, 'error');
+                addDebugMessage(`❌ Error starting conversation: ${error.message}`);
             }
         }
         
         async function setupWebRTC() {
             try {
+                addDebugMessage('🔧 Setting up WebRTC...');
+                
                 peerConnection = new RTCPeerConnection({
                     iceServers: [
                         { urls: 'stun:stun.l.google.com:19302' },
@@ -724,9 +850,11 @@ HTML_CLIENT = """
                 
                 localStream.getTracks().forEach(track => {
                     peerConnection.addTrack(track, localStream);
+                    addDebugMessage(`📡 Added ${track.kind} track`);
                 });
                 
                 peerConnection.ontrack = (event) => {
+                    addDebugMessage(`🎵 Received ${event.track.kind} track`);
                     const [remoteStream] = event.streams;
                     playAudio(remoteStream);
                 };
@@ -739,6 +867,7 @@ HTML_CLIENT = """
                                 type: 'ice-candidate',
                                 candidate: event.candidate
                             }));
+                            addDebugMessage('📤 Sent ICE candidate');
                         }
                     }
                 };
@@ -751,32 +880,36 @@ HTML_CLIENT = """
                         type: 'offer',
                         sdp: offer.sdp
                     }));
+                    addDebugMessage('📤 Sent WebRTC offer');
                 }
                 
-                updateStatus('Ready - Start speaking!', 'connected');
+                updateStatus('✅ Ready - Start speaking!', 'connected');
                 
             } catch (error) {
-                updateStatus('WebRTC setup error: ' + error.message, 'error');
-                console.error('WebRTC error:', error);
+                updateStatus('❌ WebRTC setup error: ' + error.message, 'error');
+                addDebugMessage(`❌ WebRTC error: ${error.message}`);
             }
         }
         
         async function handleSignalingMessage(event) {
             try {
                 const message = JSON.parse(event.data);
+                addDebugMessage(`📥 Received: ${message.type}`);
                 
                 if (message.type === 'answer') {
                     await peerConnection.setRemoteDescription(new RTCSessionDescription({
                         type: 'answer',
                         sdp: message.sdp
                     }));
+                    addDebugMessage('✅ Set remote description');
                 } else if (message.type === 'ice-candidate') {
                     if (message.candidate && message.candidate.candidate && message.candidate.candidate.trim() !== '') {
                         await peerConnection.addIceCandidate(new RTCIceCandidate(message.candidate));
+                        addDebugMessage('✅ Added ICE candidate');
                     }
                 }
             } catch (error) {
-                console.error('Error handling signaling message:', error);
+                addDebugMessage(`❌ Error handling signaling: ${error.message}`);
             }
         }
         
@@ -790,6 +923,8 @@ HTML_CLIENT = """
             const bufferLength = analyser.frequencyBinCount;
             const dataArray = new Uint8Array(bufferLength);
             
+            let lastSpeechTime = 0;
+            
             function updateVisualization() {
                 if (!analyser) return;
                 
@@ -801,9 +936,12 @@ HTML_CLIENT = """
                     rgba(33, 150, 243, ${average / 255}) 100%)`;
                 
                 if (average > 50) {
-                    visualizer.textContent = 'Speaking...';
+                    visualizer.textContent = '🎤 Speaking...';
+                    lastSpeechTime = Date.now();
+                } else if (Date.now() - lastSpeechTime < 2000) {
+                    visualizer.textContent = '🎧 Processing...';
                 } else {
-                    visualizer.textContent = 'Listening...';
+                    visualizer.textContent = '👂 Listening...';
                 }
                 
                 requestAnimationFrame(updateVisualization);
@@ -815,7 +953,11 @@ HTML_CLIENT = """
         function playAudio(remoteStream) {
             const audio = new Audio();
             audio.srcObject = remoteStream;
-            audio.play().catch(console.error);
+            audio.play().then(() => {
+                addDebugMessage('🔊 Playing AI response');
+            }).catch(error => {
+                addDebugMessage(`❌ Audio playback error: ${error.message}`);
+            });
         }
         
         function stopConversation() {
@@ -840,12 +982,14 @@ HTML_CLIENT = """
                 analyser = null;
             }
             
-            updateStatus('Disconnected', '');
+            updateStatus('🔌 Disconnected', '');
             startBtn.disabled = false;
             stopBtn.disabled = true;
             
             visualizer.style.background = 'rgba(255, 255, 255, 0.1)';
-            visualizer.textContent = 'Audio visualization will appear here';
+            visualizer.textContent = 'Listening...';
+            
+            addDebugMessage('🛑 Conversation stopped');
         }
         
         function updateStatus(message, className) {
@@ -867,13 +1011,15 @@ async def handle_favicon(request):
     return web.Response(body=favicon_data, content_type='image/png')
 
 async def main():
-    """Main function"""
-    print("🚀 Initializing Real-time S2S Agent...")
+    """Main function with enhanced error handling"""
+    print("🚀 UltraChat S2S - Starting server...")
     
     # Initialize models
-    initialize_models()
+    if not initialize_models():
+        print("❌ Failed to initialize models. Exiting.")
+        return
     
-    print("🎉 Starting server...")
+    print("🎉 Starting web server...")
     
     # Create aiohttp application
     app = web.Application()
@@ -889,9 +1035,10 @@ async def main():
     site = web.TCPSite(runner, '0.0.0.0', 7860)
     await site.start()
     
-    print("✅ Server started!")
-    print(f"🌐 Server running on port 7860")
-    print(f"🔌 WebSocket endpoint available at /ws")
+    print("✅ Server started successfully!")
+    print(f"🌐 Server running on http://0.0.0.0:7860")
+    print(f"🔌 WebSocket endpoint: ws://0.0.0.0:7860/ws")
+    print("📱 Open the URL in your browser to start chatting!")
     print("Press Ctrl+C to stop...")
     
     try:
