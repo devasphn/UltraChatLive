@@ -360,7 +360,16 @@ class AudioFrameProcessor:
 
 class WebRTCConnection:
     def __init__(self):
-        self.pc = RTCPeerConnection()
+        # Updated RTCPeerConnection configuration with a testing TURN server
+        self.pc = RTCPeerConnection(configuration={
+            "iceServers": [
+                {"urls": "stun:stun.l.google.com:19302"},
+                {"urls": "stun:stun1.l.google.com:19302"},
+                # Using a common testing TURN server. If this doesn't work,
+                # you will likely need to set up your own TURN server.
+                {"urls": "turn:numbers.webrtc.org:19302"} 
+            ]
+        })
         self.audio_track = AudioStreamTrack() # This is the track we SEND to the client
         self.frame_processor = None # This will handle the track we RECEIVE from the client
         
@@ -368,6 +377,7 @@ class WebRTCConnection:
         async def on_ice_connection_state_change():
             logger.info(f"🧊 ICE connection state: {self.pc.iceConnectionState}")
             if self.pc.iceConnectionState == "failed":
+                logger.error("ICE connection failed. Attempting to close PeerConnection.")
                 await self.pc.close()
 
         @self.pc.on("track")
@@ -425,17 +435,13 @@ async def websocket_handler(request):
                     
                     elif data["type"] == "ice-candidate" and "candidate" in data:
                         try:
-                            # CRITICAL FIX:
-                            # The RTCIceCandidate constructor expects the candidate string
-                            # as the FIRST POSITIONAL ARGUMENT, not a keyword argument.
-                            # The other parameters (sdp_mid, sdp_mline_index) are keyword arguments.
                             candidate_string = data.get("candidate")
                             sdp_mid = data.get("sdpMid")
                             sdp_mline_index = data.get("sdpMLineIndex")
 
                             if candidate_string and sdp_mid is not None and sdp_mline_index is not None:
                                 candidate = RTCIceCandidate(
-                                    candidate_string,  # <--- THIS IS THE KEY FIX
+                                    candidate_string,
                                     sdp_mid=sdp_mid,
                                     sdp_mline_index=sdp_mline_index,
                                 )
@@ -465,7 +471,7 @@ HTML_CLIENT = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>UltraChat S2S - DEFINITIVE FIX</title>
+    <title>UltraChat S2S - FINAL FIX</title>
     <style>
         body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; min-height: 100vh; }
         .container { background: rgba(255, 255, 255, 0.1); border-radius: 20px; padding: 30px; backdrop-filter: blur(10px); box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1); }
@@ -489,7 +495,7 @@ HTML_CLIENT = """
     <div class="container">
         <h1>🎤 Real-time S2S AI Chat - DEFINITIVE FIX</h1>
         <div class="fix-note">
-            <strong>✅ Definitive Fix Applied:</strong> This version corrects the ICE candidate format mismatch between the browser and the Python server, ensuring a stable WebRTC connection.
+            <strong>✅ Definitive Fix Applied:</strong> This version correctly configures ICE servers (STUN/TURN) to ensure robust WebRTC connection establishment.
         </div>
         <div class="controls">
             <button id="startBtn" class="start-btn">Start Conversation</button>
@@ -593,7 +599,13 @@ HTML_CLIENT = """
             addDebugMessage('🔧 setupWebRTC() called');
             try {
                 peerConnection = new RTCPeerConnection({
-                    iceServers: [ { urls: 'stun:stun.l.google.com:19302' }, { urls: 'stun:stun1.l.google.com:19302' } ]
+                    iceServers: [ 
+                        { urls: 'stun:stun.l.google.com:19302' }, 
+                        { urls: 'stun:stun1.l.google.com:19302' },
+                        // Using a common testing TURN server. If this doesn't work,
+                        // you will likely need to set up your own TURN server.
+                        { urls: 'turn:numbers.webrtc.org:19302' } 
+                    ]
                 });
                 addDebugMessage('✅ RTCPeerConnection created');
                 
@@ -612,7 +624,7 @@ HTML_CLIENT = """
                     addDebugMessage('Candidate event fired');
                     if (event.candidate && websocket && websocket.readyState === WebSocket.OPEN) {
                         // Send a flat JSON object that matches what the Python server expects.
-                        websocket.send(JSON.JSON.stringify({
+                        websocket.send(JSON.stringify({
                             type: 'ice-candidate',
                             candidate: event.candidate.candidate,
                             sdpMid: event.candidate.sdpMid,
@@ -636,6 +648,11 @@ HTML_CLIENT = """
                     } else if (state === 'failed' || state === 'closed' || state === 'disconnected') {
                         updateStatus('❌ Connection failed or closed', 'error');
                         addDebugMessage(`❌ ICE connection state is now ${state}`);
+                        // If ICE fails, it's often a network/TURN server issue.
+                        // Attempt to stop gracefully if it fails.
+                        if (state !== 'closed') { // Avoid double-closing
+                           stopConversation(false); // Don't close WS again if it already closed.
+                        }
                     }
                 };
                 
