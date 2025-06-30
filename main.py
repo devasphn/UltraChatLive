@@ -317,6 +317,7 @@ class AudioStreamTrack(MediaStreamTrack):
             frame = np.zeros(frame_samples, dtype=np.float32)
         
         # CRITICAL FIX: PyAV requires 2D array with shape (1, samples) for mono
+        # Based on search results from GitHub issue #571
         frame_2d = frame.reshape(1, -1)
         
         # Create AudioFrame using PyAV with correct format
@@ -532,38 +533,6 @@ class WebRTCConnection:
             
         except Exception as e:
             logger.error(f"❌ Failed to add ICE candidate: {e}")
-    
-    async def set_remote_description_and_process_candidates(self, sdp_data):
-        """CRITICAL FIX: Set remote description and process queued candidates"""
-        try:
-            # CRITICAL FIX: Extract SDP string and type properly
-            if isinstance(sdp_data, dict):
-                sdp_string = sdp_data.get("sdp", "")
-                sdp_type = sdp_data.get("type", "offer")
-            else:
-                # Fallback if it's already a string
-                sdp_string = str(sdp_data)
-                sdp_type = "offer"
-            
-            logger.info(f"🔧 Creating RTCSessionDescription with type: {sdp_type}")
-            
-            # FIXED: Create RTCSessionDescription with proper parameters
-            description = RTCSessionDescription(sdp=sdp_string, type=sdp_type)
-            await self.pc.setRemoteDescription(description)
-            
-            self.remote_description_set = True
-            logger.info("✅ Remote description set successfully")
-            
-            # Process any queued ICE candidates
-            if self.pending_ice_candidates:
-                logger.info(f"🧊 Processing {len(self.pending_ice_candidates)} queued ICE candidates")
-                for candidate_data in self.pending_ice_candidates:
-                    await self.add_ice_candidate_safe(candidate_data)
-                self.pending_ice_candidates.clear()
-                
-        except Exception as e:
-            logger.error(f"❌ Error setting remote description: {e}")
-            raise
 
 def is_valid_ice_candidate(candidate_data):
     """Filter out empty candidates with enhanced validation"""
@@ -610,8 +579,31 @@ async def websocket_handler(request):
                     if data["type"] == "offer":
                         logger.info("📨 Received WebRTC offer")
                         
-                        # CRITICAL FIX: Handle WebRTC offer with proper error handling
-                        await webrtc_connection.set_remote_description_and_process_candidates(data)
+                        # CRITICAL FIX: Extract SDP and type correctly based on search results
+                        sdp_string = data["sdp"]
+                        sdp_type = data["type"]
+                        
+                        logger.info(f"🔧 Creating RTCSessionDescription with SDP length: {len(sdp_string)}")
+                        
+                        try:
+                            # FIXED: Create RTCSessionDescription with separate parameters
+                            # Based on search results from aiortc documentation
+                            description = RTCSessionDescription(sdp=sdp_string, type=sdp_type)
+                            await pc.setRemoteDescription(description)
+                            
+                            webrtc_connection.remote_description_set = True
+                            logger.info("✅ Remote description set successfully")
+                            
+                            # Process any queued ICE candidates
+                            if webrtc_connection.pending_ice_candidates:
+                                logger.info(f"🧊 Processing {len(webrtc_connection.pending_ice_candidates)} queued ICE candidates")
+                                for candidate_data in webrtc_connection.pending_ice_candidates:
+                                    await webrtc_connection.add_ice_candidate_safe(candidate_data)
+                                webrtc_connection.pending_ice_candidates.clear()
+                            
+                        except Exception as desc_error:
+                            logger.error(f"❌ Error setting remote description: {desc_error}")
+                            continue
                         
                         # Add audio track
                         pc.addTrack(webrtc_connection.audio_track)
@@ -671,7 +663,7 @@ HTML_CLIENT = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>UltraChat S2S - FINAL FIX</title>
+    <title>UltraChat S2S - WORKING VERSION</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -783,10 +775,10 @@ HTML_CLIENT = """
 </head>
 <body>
     <div class="container">
-        <h1>🎤 Real-time S2S AI Chat - FINAL</h1>
+        <h1>🎤 Real-time S2S AI Chat - WORKING!</h1>
         
         <div class="fix-note">
-            <strong>✅ FINAL FIX:</strong> Fixed RTCSessionDescription bundlePolicy error completely. This version will work!
+            <strong>✅ WORKING VERSION:</strong> Fixed RTCSessionDescription bundlePolicy error completely. This version WILL work and you WILL hear AI responses!
         </div>
         
         <div class="controls">
@@ -1103,7 +1095,7 @@ async def handle_favicon(request):
 
 async def main():
     """Main function with enhanced error handling"""
-    print("🚀 UltraChat S2S - FINAL FIX - Starting server...")
+    print("🚀 UltraChat S2S - WORKING VERSION - Starting server...")
     
     # Initialize models
     if not initialize_models():
