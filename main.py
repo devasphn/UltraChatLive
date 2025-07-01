@@ -468,7 +468,7 @@ HTML_CLIENT = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>UltraChat S2S - FINAL FIX</title>
+    <title>UltraChat S2S - DEFINITIVE FIX</title>
     <style>
         body { font-family: Arial, sans-serif; max-width: 800px; margin: 0 auto; padding: 20px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; min-height: 100vh; }
         .container { background: rgba(255, 255, 255, 0.1); border-radius: 20px; padding: 30px; backdrop-filter: blur(10px); box-shadow: 0 8px 32px rgba(0, 0, 0, 0.1); }
@@ -492,7 +492,7 @@ HTML_CLIENT = """
     <div class="container">
         <h1>🎤 Real-time S2S AI Chat - DEFINITIVE FIX</h1>
         <div class="fix-note">
-            <strong>✅ Definitive Fix Applied:</strong> Relying strictly on STUN servers, as public TURN servers proved problematic. If audio still doesn't work, a dedicated TURN server with credentials is the next necessary step.
+            <strong>✅ Definitive Fix Applied:</strong> Relying strictly on STUN servers, as the public TURN server caused authentication issues. If audio still doesn't work, a dedicated TURN server with credentials is the next necessary step.
         </div>
         <div class="controls">
             <button id="startBtn" class="start-btn">Start Conversation</button>
@@ -595,7 +595,7 @@ HTML_CLIENT = """
         async function setupWebRTC() {
             addDebugMessage('🔧 setupWebRTC() called');
             try {
-                // STRICTLY ONLY STUN SERVERS. No TURN servers configured.
+                // STRICTLY ONLY STUN SERVERS. No problematic TURN servers.
                 peerConnection = new RTCPeerConnection({
                     iceServers: [ 
                         { urls: 'stun:stun.l.google.com:19302' }, 
@@ -682,7 +682,7 @@ HTML_CLIENT = """
         async function handleSignalingMessage(event) {
             addDebugMessage('📥 handleSignalingMessage() called');
             try {
-                const message = JSON.parse(event.data);
+                const message = JSON.loads(event.data);
                 addDebugMessage(`📥 Received signaling message: ${message.type}`);
                 
                 if (!peerConnection) {
