@@ -50,6 +50,41 @@ tts_model = None
 vad_model = None
 executor = ThreadPoolExecutor(max_workers=4)
 
+def candidate_from_sdp(candidate_string: str) -> dict:
+    """
+    Parse an ICE candidate string and return parameters for RTCIceCandidate object.
+    This matches the aiortc internal implementation from sdp.py.
+    """
+    # Remove "candidate:" prefix if present
+    if candidate_string.startswith("candidate:"):
+        candidate_string = candidate_string[10:]
+    
+    bits = candidate_string.split()
+    if len(bits) < 8:
+        raise ValueError(f"Invalid candidate string: {candidate_string}")
+
+    # Create the candidate with individual parameters
+    candidate_params = {
+        'component': int(bits[1]),
+        'foundation': bits[0],
+        'ip': bits[4],
+        'port': int(bits[5]),
+        'priority': int(bits[3]),
+        'protocol': bits[2],
+        'type': bits[7],
+    }
+
+    # Parse optional parameters
+    for i in range(8, len(bits) - 1, 2):
+        if bits[i] == "raddr":
+            candidate_params['relatedAddress'] = bits[i + 1]
+        elif bits[i] == "rport":
+            candidate_params['relatedPort'] = int(bits[i + 1])
+        elif bits[i] == "tcptype":
+            candidate_params['tcpType'] = bits[i + 1]
+
+    return candidate_params
+
 class SileroVAD:
     def __init__(self):
         """Initialize Silero VAD model with enhanced error handling"""
@@ -385,7 +420,6 @@ class AudioFrameProcessor:
 
 class WebRTCConnection:
     def __init__(self):
-        # **FIXED: Proper RTCConfiguration object**
         configuration = RTCConfiguration(
             iceServers=[
                 RTCIceServer(urls="stun:stun.l.google.com:19302"),
@@ -471,18 +505,22 @@ async def websocket_handler(request):
                     elif data["type"] == "ice-candidate" and "candidate" in data:
                         try:
                             candidate_string = data.get("candidate")
-                            sdp_mid = data.get("sdpMid")  # **FIXED: Correct parameter name**
-                            sdp_mline_index = data.get("sdpMLineIndex")  # **FIXED: Correct parameter name**
+                            sdp_mid = data.get("sdpMid")
+                            sdp_mline_index = data.get("sdpMLineIndex")
                             
                             if candidate_string and sdp_mid is not None and sdp_mline_index is not None:
-                                # **FIXED: Correct RTCIceCandidate creation**
-                                candidate = RTCIceCandidate(
-                                    candidate=candidate_string,
-                                    sdpMid=sdp_mid,
-                                    sdpMLineIndex=sdp_mline_index
-                                )
-                                await connection.pc.addIceCandidate(candidate)
-                                logger.debug(f"✅ Added ICE candidate: {candidate_string[:30]}...")
+                                # ✅ FIXED: Parse candidate string into individual parameters
+                                try:
+                                    candidate_params = candidate_from_sdp(candidate_string)
+                                    candidate = RTCIceCandidate(
+                                        **candidate_params,
+                                        sdpMid=sdp_mid,
+                                        sdpMLineIndex=sdp_mline_index
+                                    )
+                                    await connection.pc.addIceCandidate(candidate)
+                                    logger.info(f"✅ Added ICE candidate: {candidate.foundation} {candidate.type} {candidate.ip}:{candidate.port}")
+                                except Exception as parse_error:
+                                    logger.error(f"❌ Error parsing candidate string '{candidate_string}': {parse_error}")
                             else:
                                 logger.warning(f"Received incomplete ICE candidate data: {data}")
                                 
@@ -505,7 +543,7 @@ async def websocket_handler(request):
     
     return ws
 
-# **COMPLETE HTML CLIENT**
+# **COMPLETE HTML CLIENT** (unchanged)
 HTML_CLIENT = """
 <!DOCTYPE html>
 <html>
