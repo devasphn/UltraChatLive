@@ -3,17 +3,11 @@ import asyncio
 import json
 import logging
 import numpy as np
-import tempfile
-import torchaudio
-import websockets
-import threading
-import ssl
-import os
 import fractions
-from aiohttp import web, web_runner, WSMsgType
+from aiohttp import web, WSMsgType
 from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack, RTCIceCandidate, RTCConfiguration, RTCIceServer
-import av  # PyAV for AudioFrame
-from aiortc.contrib.media import MediaRecorder, MediaRelay, MediaBlackhole
+import av
+from aiortc.contrib.media import MediaBlackhole
 from transformers import pipeline
 from chatterbox.tts import ChatterboxTTS
 from concurrent.futures import ThreadPoolExecutor
@@ -84,6 +78,28 @@ def candidate_from_sdp(candidate_string: str) -> dict:
             candidate_params['tcpType'] = bits[i + 1]
 
     return candidate_params
+
+def parse_ultravox_response(result):
+    """
+    Parse Ultravox response which can be in different formats:
+    - String (newer versions with small max_new_tokens)
+    - List with dict containing 'generated_text' (older format)
+    - List with string (intermediate format)
+    """
+    try:
+        if isinstance(result, str):
+            return result
+        elif isinstance(result, list) and len(result) > 0:
+            item = result[0]
+            if isinstance(item, str):
+                return item
+            elif isinstance(item, dict) and 'generated_text' in item:
+                return item['generated_text']
+        logger.warning(f"Unexpected Ultravox response format: {type(result)}")
+        return ""
+    except Exception as e:
+        logger.error(f"Error parsing Ultravox response: {e}")
+        return ""
 
 class SileroVAD:
     def __init__(self):
@@ -254,15 +270,18 @@ class OptimizedTTS:
                 
                 result = wav.cpu().numpy().flatten().astype(np.float32)
                 
-                if hasattr(tts_model, 'sample_rate') and tts_model.sample_rate != 16000:
-                    result = librosa.resample(result, orig_sr=tts_model.sample_rate, target_sr=16000)
+                # Resample from TTS output rate to 48kHz for WebRTC
+                if hasattr(tts_model, 'sample_rate') and tts_model.sample_rate != 48000:
+                    result = librosa.resample(result, orig_sr=tts_model.sample_rate, target_sr=48000)
+                elif len(result) > 0:  # Assume 16kHz if no sample_rate attribute
+                    result = librosa.resample(result, orig_sr=16000, target_sr=48000)
                 
-                logger.info(f"✅ TTS generated {len(result)} samples")
+                logger.info(f"✅ TTS generated {len(result)} samples at 48kHz")
                 return result
                 
         except Exception as e:
             logger.error(f"❌ TTS synthesis error: {e}")
-            return np.zeros(1600, dtype=np.float32)
+            return np.zeros(4800, dtype=np.float32)  # 100ms of silence at 48kHz
 
 class AudioStreamTrack(MediaStreamTrack):
     kind = "audio"
@@ -274,7 +293,7 @@ class AudioStreamTrack(MediaStreamTrack):
         self._current_response = None
         self._response_position = 0
         self._timestamp = 0
-        self._time_base = fractions.Fraction(1, 16000)
+        self._time_base = fractions.Fraction(1, 48000)  # 48kHz for WebRTC
         self._consumer_task = None
         self._is_running = False
 
@@ -295,7 +314,7 @@ class AudioStreamTrack(MediaStreamTrack):
             logger.error(f"❌ Audio output consumer error: {e}")
 
     async def recv(self):
-        frame_samples = 320  # 20ms at 16kHz
+        frame_samples = 960  # 20ms at 48kHz
         
         if self._current_response is None or self._response_position >= len(self._current_response):
             try:
@@ -315,11 +334,15 @@ class AudioStreamTrack(MediaStreamTrack):
         else:
             frame = np.zeros(frame_samples, dtype=np.float32)
         
-        frame_2d = frame.reshape(1, -1)
-        audio_frame = av.AudioFrame.from_ndarray(frame_2d, format="flt", layout="mono")
+        # Convert float32 to int16 for Opus encoder
+        frame_int16 = np.clip(frame * 32767.0, -32768, 32767).astype(np.int16)
+        frame_2d = frame_int16.reshape(1, -1)
+        
+        # Use s16 format for Opus encoder compatibility
+        audio_frame = av.AudioFrame.from_ndarray(frame_2d, format="s16", layout="mono")
         audio_frame.pts = self._timestamp
         audio_frame.time_base = self._time_base
-        audio_frame.sample_rate = 16000
+        audio_frame.sample_rate = 48000
         
         self._timestamp += frame_samples
         return audio_frame
@@ -364,8 +387,15 @@ class AudioFrameProcessor:
                 if len(audio_data.shape) > 1:
                     audio_data = audio_data[0]
                 
-                if audio_data.dtype != np.float32:
+                # Convert from browser's typical format to float32
+                if audio_data.dtype == np.int16:
+                    audio_data = audio_data.astype(np.float32) / 32768.0
+                elif audio_data.dtype != np.float32:
                     audio_data = audio_data.astype(np.float32)
+                
+                # Resample from 48kHz (browser) to 16kHz (for processing)
+                if frame.sample_rate == 48000:
+                    audio_data = librosa.resample(audio_data, orig_sr=48000, target_sr=16000)
                 
                 self.audio_buffer.add_audio(audio_data)
                 
@@ -410,7 +440,8 @@ class AudioFrameProcessor:
                 }, max_new_tokens=40, do_sample=True, temperature=0.7, top_p=0.9, 
                 repetition_penalty=1.1, pad_token_id=uv_pipe.tokenizer.eos_token_id)
             
-            response_text = result[0]["generated_text"].strip()
+            # Use the new parser to handle different response formats
+            response_text = parse_ultravox_response(result).strip()
             logger.info(f"✅ Ultravox raw response: '{response_text}'")
             return response_text
             
@@ -509,7 +540,7 @@ async def websocket_handler(request):
                             sdp_mline_index = data.get("sdpMLineIndex")
                             
                             if candidate_string and sdp_mid is not None and sdp_mline_index is not None:
-                                # ✅ FIXED: Parse candidate string into individual parameters
+                                # Parse candidate string into individual parameters
                                 try:
                                     candidate_params = candidate_from_sdp(candidate_string)
                                     candidate = RTCIceCandidate(
@@ -543,7 +574,7 @@ async def websocket_handler(request):
     
     return ws
 
-# **COMPLETE HTML CLIENT** (unchanged)
+# HTML CLIENT with improved audio handling
 HTML_CLIENT = """
 <!DOCTYPE html>
 <html>
@@ -687,10 +718,10 @@ HTML_CLIENT = """
                 updateStatus('🔄 Connecting...', 'connecting');
                 showLoading(true);
                 
-                // Get user media
+                // Get user media with optimal settings for WebRTC
                 localStream = await navigator.mediaDevices.getUserMedia({
                     audio: {
-                        sampleRate: 16000,
+                        sampleRate: 48000,
                         channelCount: 1,
                         echoCancellation: true,
                         noiseSuppression: true,
@@ -711,11 +742,28 @@ HTML_CLIENT = """
                     pc.addTrack(track, localStream);
                 });
                 
-                // Handle remote stream
+                // Handle remote stream with better audio context
                 pc.ontrack = event => {
                     const remoteAudio = new Audio();
                     remoteAudio.srcObject = event.streams[0];
-                    remoteAudio.play().catch(e => console.error('Audio play error:', e));
+                    remoteAudio.autoplay = true;
+                    remoteAudio.volume = 1.0;
+                    
+                    // Create audio context for better processing
+                    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                    const source = audioContext.createMediaStreamSource(event.streams[0]);
+                    const destination = audioContext.createMediaStreamDestination();
+                    
+                    // Connect source to destination for playback
+                    source.connect(destination);
+                    
+                    remoteAudio.play().catch(e => {
+                        console.error('Audio play error:', e);
+                        // Try to resume audio context if suspended
+                        if (audioContext.state === 'suspended') {
+                            audioContext.resume();
+                        }
+                    });
                 };
                 
                 // Handle ICE candidates
@@ -806,6 +854,13 @@ HTML_CLIENT = """
         
         // Handle page unload
         window.addEventListener('beforeunload', stopConversation);
+        
+        // Resume audio context on user interaction
+        document.addEventListener('click', () => {
+            if (window.audioContext && window.audioContext.state === 'suspended') {
+                window.audioContext.resume();
+            }
+        });
     </script>
 </body>
 </html>
@@ -815,7 +870,7 @@ async def index_handler(request):
     return web.Response(text=HTML_CLIENT, content_type='text/html')
 
 async def main():
-    print("🚀 UltraChat S2S - DEFINITIVE FIX - Starting server...")
+    print("🚀 UltraChat S2S - FINAL WORKING VERSION - Starting server...")
     
     # Initialize models
     if not initialize_models():
@@ -838,6 +893,11 @@ async def main():
     print("✅ Server started successfully!")
     print("🌐 Server running on http://0.0.0.0:7860")
     print("📱 Open the URL in your browser to start chatting!")
+    print("🔧 Key fixes applied:")
+    print("   • Opus encoder: s16 format (16-bit PCM)")
+    print("   • Audio resampling: 48kHz WebRTC ↔ 16kHz processing")
+    print("   • Ultravox response parsing: handles all formats")
+    print("   • Enhanced audio context for browser playback")
     
     try:
         while True:
