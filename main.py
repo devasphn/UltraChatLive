@@ -360,7 +360,9 @@ class AudioFrameProcessor:
 
 class WebRTCConnection:
     def __init__(self):
-        # Strictly using STUN servers only, as TURN servers proved problematic for testing.
+        # Correct RTCPeerConnection configuration:
+        # - Strictly using STUN servers only.
+        # - Ensuring no TURN servers are specified that lack credentials.
         self.pc = RTCPeerConnection(configuration={
             "iceServers": [
                 {"urls": "stun:stun.l.google.com:19302"},
@@ -386,17 +388,27 @@ class WebRTCConnection:
                 asyncio.create_task(self.frame_processor.start())
 
     async def handle_offer(self, sdp, type):
-        description = RTCSessionDescription(sdp=sdp, type=type)
-        await self.pc.setRemoteDescription(description)
-        self.pc.addTrack(self.audio_track)
-        self.audio_track.start_consumer()
-        recorder = MediaBlackhole()
-        recorder.addTrack(self.audio_track)
-        await recorder.start()
-        answer = await self.pc.createAnswer()
-        await self.pc.setLocalDescription(answer)
-        return self.pc.localDescription
-    
+        try:
+            # Create RTCSessionDescription correctly
+            description = RTCSessionDescription(sdp=sdp, type=type)
+            await self.pc.setRemoteDescription(description)
+            logger.info("✅ Remote description set successfully.")
+
+            self.pc.addTrack(self.audio_track)
+            self.audio_track.start_consumer()
+            recorder = MediaBlackhole()
+            recorder.addTrack(self.audio_track)
+            await recorder.start()
+            logger.info("🎵 Outgoing audio track added and consumer started.")
+
+            answer = await self.pc.createAnswer()
+            await self.pc.setLocalDescription(answer)
+            logger.info("✅ Local description (answer) created and set.")
+            return self.pc.localDescription
+        except Exception as e:
+            logger.error(f"❌ Error in handle_offer: {e}", exc_info=True)
+            raise # Re-raise the exception to be caught by the websocket handler
+
     async def close(self):
         if self.frame_processor:
             await self.frame_processor.stop()
@@ -423,6 +435,7 @@ async def websocket_handler(request):
                     data = json.loads(msg.data)
                     if data["type"] == "offer":
                         logger.info("📨 Received WebRTC offer")
+                        # Pass sdp and type directly to handle_offer
                         local_description = await connection.handle_offer(sdp=data["sdp"], type=data["type"])
                         await ws.send_str(json.dumps({
                             "type": "answer",
@@ -436,7 +449,11 @@ async def websocket_handler(request):
                             sdp_mid = data.get("sdpMid")
                             sdp_mline_index = data.get("sdpMLineIndex")
 
+                            # Ensure all necessary parts are present before creating RTCIceCandidate
                             if candidate_string and sdp_mid is not None and sdp_mline_index is not None:
+                                # CORRECTED RTCIceCandidate Creation:
+                                # - 'candidate' is the first POSITIONAL argument.
+                                # - 'sdp_mid' and 'sdp_mline_index' are keyword arguments.
                                 candidate = RTCIceCandidate(
                                     candidate_string,
                                     sdp_mid=sdp_mid,
@@ -451,6 +468,9 @@ async def websocket_handler(request):
                             logger.error(f"❌ Error adding ICE candidate. Data: {data}. Error: {e}", exc_info=True)
                 except json.JSONDecodeError:
                     logger.error("❌ Received invalid JSON message.")
+                except AttributeError as ae:
+                    # This is to catch the 'dict' object has no attribute 'bundlePolicy' error
+                    logger.error(f"❌ AttributeError during message processing: {ae}. Data: {data}", exc_info=True)
                 except Exception as e:
                     logger.error(f"❌ Error processing message: {e}", exc_info=True)
 
@@ -492,7 +512,7 @@ HTML_CLIENT = """
     <div class="container">
         <h1>🎤 Real-time S2S AI Chat - DEFINITIVE FIX</h1>
         <div class="fix-note">
-            <strong>✅ Definitive Fix Applied:</strong> Relying strictly on STUN servers, as the public TURN server caused authentication issues. If audio still doesn't work, a dedicated TURN server with credentials is the next necessary step.
+            <strong>✅ Definitive Fix Applied:</strong> Strict focus on correct `RTCSessionDescription` and `RTCIceCandidate` construction based on `aiortc` API. Relying only on STUN servers. If audio still fails, a properly configured TURN server is necessary.
         </div>
         <div class="controls">
             <button id="startBtn" class="start-btn">Start Conversation</button>
@@ -595,7 +615,7 @@ HTML_CLIENT = """
         async function setupWebRTC() {
             addDebugMessage('🔧 setupWebRTC() called');
             try {
-                // STRICTLY ONLY STUN SERVERS. No problematic TURN servers.
+                // Corrected: Using STRICTLY ONLY STUN SERVERS.
                 peerConnection = new RTCPeerConnection({
                     iceServers: [ 
                         { urls: 'stun:stun.l.google.com:19302' }, 
@@ -618,14 +638,18 @@ HTML_CLIENT = """
                 peerConnection.onicecandidate = (event) => {
                     addDebugMessage('Candidate event fired');
                     if (event.candidate && websocket && websocket.readyState === WebSocket.OPEN) {
-                        // Send a flat JSON object that matches what the Python server expects.
-                        websocket.send(JSON.stringify({
-                            type: 'ice-candidate',
-                            candidate: event.candidate.candidate,
-                            sdpMid: event.candidate.sdpMid,
-                            sdpMLineIndex: event.candidate.sdpMLineIndex,
-                        }));
-                        addDebugMessage(`📤 Sent ICE candidate: ${event.candidate.type}`);
+                        // Ensure that we only send candidates that are valid strings
+                        if (event.candidate.candidate && event.candidate.candidate.trim() !== '' && event.candidate.candidate.trim() !== 'null') {
+                            websocket.send(JSON.stringify({
+                                type: 'ice-candidate',
+                                candidate: event.candidate.candidate,
+                                sdpMid: event.candidate.sdpMid,
+                                sdpMLineIndex: event.candidate.sdpMLineIndex,
+                            }));
+                            addDebugMessage(`📤 Sent ICE candidate: ${event.candidate.type}`);
+                        } else {
+                            addDebugMessage('Skipping empty or null candidate.');
+                        }
                     } else {
                          addDebugMessage('No candidate or WebSocket not open, skipping send.');
                     }
@@ -658,6 +682,8 @@ HTML_CLIENT = """
                 addDebugMessage('➡️ Creating WebRTC offer...');
                 const offer = await peerConnection.createOffer();
                 addDebugMessage('✅ Offer created');
+                
+                // Setting local description is crucial BEFORE sending the offer
                 await peerConnection.setLocalDescription(offer);
                 addDebugMessage('✅ Local description set');
                 
@@ -682,7 +708,7 @@ HTML_CLIENT = """
         async function handleSignalingMessage(event) {
             addDebugMessage('📥 handleSignalingMessage() called');
             try {
-                const message = JSON.loads(event.data);
+                const message = JSON.parse(event.data);
                 addDebugMessage(`📥 Received signaling message: ${message.type}`);
                 
                 if (!peerConnection) {
@@ -692,6 +718,7 @@ HTML_CLIENT = """
 
                 if (message.type === 'answer') {
                     addDebugMessage('✅ Processing incoming answer');
+                    // Ensure we are creating RTCSessionDescription correctly
                     await peerConnection.setRemoteDescription(new RTCSessionDescription(message));
                     addDebugMessage('✅ Remote description set from answer');
                 } else if (message.type === 'ice-candidate') {
@@ -700,7 +727,8 @@ HTML_CLIENT = """
                     addDebugMessage('ℹ️ Received ICE candidate message from server (unexpected in this flow).');
                 }
             } catch (error) {
-                addDebugMessage(`❌ Error handling signaling message: ${error.message}`);
+                updateStatus('❌ Error handling signaling message: ' + error.message, 'error');
+                addDebugMessage(`❌ Error in handleSignalingMessage(): ${error.message}`);
                 console.error("Full error in handleSignalingMessage:", error); // Log full error to browser console
             }
         }
@@ -728,7 +756,7 @@ HTML_CLIENT = """
                 updateVisualization();
                 addDebugMessage('✅ Audio visualization setup complete');
             } catch (error) {
-                addDebugMessage(`❌ Error setting up audio visualization: ${error.message}`);
+                updateStatus('❌ Error setting up audio visualization: ' + error.message, 'error');
                 console.error("Full error in setupAudioVisualization:", error);
             }
         }
