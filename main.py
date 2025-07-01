@@ -360,14 +360,14 @@ class AudioFrameProcessor:
 
 class WebRTCConnection:
     def __init__(self):
-        # Updated RTCPeerConnection configuration with a testing TURN server
+        # Updated RTCPeerConnection configuration, relying only on STUN servers for now.
+        # If this still fails, a proper TURN server with credentials will be necessary.
         self.pc = RTCPeerConnection(configuration={
             "iceServers": [
                 {"urls": "stun:stun.l.google.com:19302"},
-                {"urls": "stun:stun1.l.google.com:19302"},
-                # Using a common testing TURN server. If this doesn't work,
-                # you will likely need to set up your own TURN server.
-                {"urls": "turn:numbers.webrtc.org:19302"} 
+                {"urls": "stun:stun1.l.google.com:19302"}
+                # Reverted from the public TURN server as it caused auth issues.
+                # The next step will be your own TURN server if STUN alone fails.
             ]
         })
         self.audio_track = AudioStreamTrack() # This is the track we SEND to the client
@@ -495,7 +495,7 @@ HTML_CLIENT = """
     <div class="container">
         <h1>🎤 Real-time S2S AI Chat - DEFINITIVE FIX</h1>
         <div class="fix-note">
-            <strong>✅ Definitive Fix Applied:</strong> This version correctly configures ICE servers (STUN/TURN) to ensure robust WebRTC connection establishment.
+            <strong>✅ Definitive Fix Applied:</strong> Relying on STUN servers only, as the public TURN server caused authentication issues. If this still fails, a dedicated TURN server is needed.
         </div>
         <div class="controls">
             <button id="startBtn" class="start-btn">Start Conversation</button>
@@ -601,10 +601,9 @@ HTML_CLIENT = """
                 peerConnection = new RTCPeerConnection({
                     iceServers: [ 
                         { urls: 'stun:stun.l.google.com:19302' }, 
-                        { urls: 'stun:stun1.l.google.com:19302' },
-                        // Using a common testing TURN server. If this doesn't work,
-                        // you will likely need to set up your own TURN server.
-                        { urls: 'turn:numbers.webrtc.org:19302' } 
+                        { urls: 'stun:stun1.l.google.com:19302' }
+                        // Removed the problematic public TURN server.
+                        // If STUN alone fails, you WILL need your own TURN server.
                     ]
                 });
                 addDebugMessage('✅ RTCPeerConnection created');
