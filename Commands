@@ -1,8 +1,8 @@
 cd workspace
 python3 -m venv venv
 source venv/bin/activate
-git clone https://github.com/devasphn/UltraChatLive/ 
-cd UltraChatLive
+git clone https://github.com/devasphn/UltraChatLive1/ 
+cd UltraChatLive1
 
 apt-get update && apt-get install -y libsox-dev libsndfile1-dev portaudio19-dev
 
