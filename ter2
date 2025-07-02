@@ -1,0 +1,14 @@
+# You are in a normal terminal prompt. It might look like this:
+# root@...:/workspace/UltraChatLive1#
+
+# 1. Download the cloudflared program
+wget https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64
+
+# 2. Make the downloaded file executable (so you can run it)
+chmod +x cloudflared-linux-amd64
+
+# 3. Move it to a system-wide location so you can run it from anywhere
+sudo mv cloudflared-linux-amd64 /usr/local/bin/cloudflared
+
+
+cloudflared tunnel --url http://localhost:7860
