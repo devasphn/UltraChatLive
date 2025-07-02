@@ -12,3 +12,4 @@ sudo mv cloudflared-linux-amd64 /usr/local/bin/cloudflared
 
 
 cloudflared tunnel --url http://localhost:7860
+ visit: https://sb-rug-merchants-auctions.trycloudflare.com/
