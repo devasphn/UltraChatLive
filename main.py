@@ -1,12 +1,3 @@
-# ==============================================================================
-# UltraChat S2S - FINAL PRODUCTION FIX
-#
-# This version addresses the race condition in audio playback by removing
-# MediaBlackhole and using a more direct and robust track management system.
-# This should definitively solve the "no audio" issue.
-#
-# My sincerest apologies for the long journey. This is the solution.
-# ==============================================================================
 
 import torch
 import asyncio
@@ -40,10 +31,9 @@ logging.getLogger('aioice.ice').setLevel(logging.WARNING)
 logging.getLogger('aiortc').setLevel(logging.WARNING)
 
 uv_pipe, tts_model, vad_model, executor = None, None, None, ThreadPoolExecutor(max_workers=4)
-pcs = set() # Store active PeerConnections
+pcs = set()
 
 def candidate_from_sdp(candidate_string: str) -> dict:
-    # (Your original, working function)
     if candidate_string.startswith("candidate:"): candidate_string = candidate_string[10:]
     bits = candidate_string.split()
     if len(bits) < 8: raise ValueError(f"Invalid candidate string: {candidate_string}")
@@ -57,7 +47,6 @@ def candidate_from_sdp(candidate_string: str) -> dict:
     return params
 
 def parse_ultravox_response(result):
-    # (Your original, working function)
     try:
         if isinstance(result, str): return result
         elif isinstance(result, list) and len(result) > 0:
@@ -70,7 +59,6 @@ def parse_ultravox_response(result):
         return ""
 
 class SileroVAD:
-    # (Your original class)
     def __init__(self):
         try:
             logger.info("🎤 Loading Silero VAD model...")
@@ -89,7 +77,6 @@ class SileroVAD:
         except Exception: return True
 
 def initialize_models():
-    # (Your original function with the pipeline fix)
     global uv_pipe, tts_model, vad_model
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     logger.info(f"🚀 Initializing models on device: {device}")
@@ -108,7 +95,6 @@ def initialize_models():
         return False
 
 class AudioBuffer:
-    # (Your original class)
     def __init__(self, max_duration=3.0, sample_rate=16000):
         self.sample_rate, self.max_samples = sample_rate, int(max_duration * sample_rate)
         self.buffer = collections.deque(maxlen=self.max_samples)
@@ -124,12 +110,13 @@ class AudioBuffer:
         current_time = time.time()
         if len(self.buffer) > self.min_speech_samples and (current_time - self.last_process_time) > self.process_interval:
             self.last_process_time = current_time
-            return vad_model.detect_speech(self.get_audio_array(), self.sample_rate)
+            audio_array = self.get_audio_array()
+            if np.abs(audio_array).max() < 0.005: return False
+            return vad_model.detect_speech(audio_array, self.sample_rate)
         return False
     def reset(self): self.buffer.clear()
 
 class ResponseAudioTrack(MediaStreamTrack):
-    # (Your original class, no changes needed here)
     kind = "audio"
     def __init__(self):
         super().__init__()
@@ -177,6 +164,7 @@ class AudioProcessor:
                 if self.buffer.should_process():
                     audio_to_process = self.buffer.get_audio_array()
                     self.buffer.reset()
+                    logger.info(f"Processing {len(audio_to_process)} samples...")
                     asyncio.create_task(self.process_speech(audio_to_process))
         except asyncio.CancelledError: pass
         except Exception as e: logger.error(f"Audio processor error: {e}", exc_info=True)
@@ -196,8 +184,6 @@ class AudioProcessor:
         except Exception as e: logger.error(f"Speech processing error: {e}", exc_info=True)
 
 class WebRTCConnection:
-    # --- THIS IS THE MAIN FIX ---
-    # Simplified logic to be more robust.
     def __init__(self):
         self.pc = RTCPeerConnection(RTCConfiguration([RTCIceServer(urls="stun:stun.l.google.com:19302")]))
         self.processor = None
@@ -216,7 +202,7 @@ class WebRTCConnection:
         @self.pc.on("connectionstatechange")
         async def on_connectionstatechange():
             logger.info(f"ICE Connection State is {self.pc.connectionState}")
-            if self.pc.connectionState == "failed" or self.pc.connectionState == "closed":
+            if self.pc.connectionState in ["failed", "closed", "disconnected"]:
                 await self.close()
 
     async def handle_offer(self, sdp, type):
@@ -232,9 +218,9 @@ class WebRTCConnection:
             await self.processor.stop()
         if self.pc.connectionState != "closed":
             await self.pc.close()
+            logger.info("WebRTC Connection gracefully closed.")
 
 async def websocket_handler(request):
-    # (Your original handler with the correct ICE candidate logic)
     ws = web.WebSocketResponse(heartbeat=30)
     await ws.prepare(request)
     conn = WebRTCConnection()
@@ -251,10 +237,9 @@ async def websocket_handler(request):
                         if candidate_string:
                             params = candidate_from_sdp(candidate_string)
                             candidate = RTCIceCandidate(
-                                component=params['component'], foundation=params['foundation'],
-                                ip=params['ip'], port=params['port'], priority=params['priority'],
-                                protocol=params['protocol'], type=params['type'],
-                                sdpMid=data["candidate"].get("sdpMid"), sdpMLineIndex=data["candidate"].get("sdpMLineIndex")
+                                sdpMid=data["candidate"].get("sdpMid"),
+                                sdpMLineIndex=data["candidate"].get("sdpMLineIndex"),
+                                **params
                             )
                             await conn.pc.addIceCandidate(candidate)
                     except Exception as e: logger.error(f"Error adding ICE candidate: {e}")
@@ -263,6 +248,7 @@ async def websocket_handler(request):
         await conn.close()
     return ws
 
+# --- FIX: Restored the HTML_CLIENT and index_handler that were deleted ---
 HTML_CLIENT = """
 <!DOCTYPE html>
 <html>
@@ -294,7 +280,6 @@ HTML_CLIENT = """
         startBtn.disabled = true;
         updateStatus('🔄 Connecting...', 'connecting');
         try {
-            // This is the most robust way to handle audio contexts
             const audioContext = new (window.AudioContext || window.webkitAudioContext)();
             if (audioContext.state === 'suspended') { await audioContext.resume(); }
 
@@ -320,9 +305,9 @@ HTML_CLIENT = """
             pc.onconnectionstatechange = () => {
                 updateStatus(`Connection: ${pc.connectionState}`, 'connecting');
                 if (pc.connectionState === 'connected') {
-                     updateStatus('✅ Connected', 'connected');
+                     updateStatus('✅ Connected & Listening...', 'connected');
                      stopBtn.disabled = false;
-                } else if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+                } else if (pc.connectionState === 'failed' || pc.connectionState === 'closed' || pc.connectionState === 'disconnected') {
                     stop();
                 }
             };
@@ -363,6 +348,10 @@ HTML_CLIENT = """
 </body>
 </html>
 """
+
+async def index_handler(request):
+    return web.Response(text=HTML_CLIENT, content_type='text/html')
+# --- End of FIX ---
 
 async def on_shutdown(app):
     for pc_conn in list(pcs):
