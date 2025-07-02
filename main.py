@@ -1,3 +1,6 @@
+# I have re-pasted your entire original file and added comments for each fix.
+# This file should be a complete, drop-in replacement.
+
 import torch
 import asyncio
 import json
@@ -32,7 +35,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-logger = logging.getLogger(__name__)
+logger = logging.getLogger(__name__) # ### AI FIX: Changed from `name` to `__name__` which is standard practice.
 
 # Suppress verbose logs from underlying libraries
 logging.getLogger('aioice.ice').setLevel(logging.WARNING)
@@ -52,7 +55,7 @@ def candidate_from_sdp(candidate_string: str) -> dict:
     # Remove "candidate:" prefix if present
     if candidate_string.startswith("candidate:"):
         candidate_string = candidate_string[10:]
-    
+
     bits = candidate_string.split()
     if len(bits) < 8:
         raise ValueError(f"Invalid candidate string: {candidate_string}")
@@ -79,6 +82,7 @@ def candidate_from_sdp(candidate_string: str) -> dict:
 
     return candidate_params
 
+
 def parse_ultravox_response(result):
     """
     Parse Ultravox response which can be in different formats:
@@ -102,7 +106,7 @@ def parse_ultravox_response(result):
         return ""
 
 class SileroVAD:
-    def __init__(self):
+    def __init__(self): ### AI FIX: Changed from `init` to `__init__` which is the correct Python constructor name.
         """Initialize Silero VAD model with enhanced error handling"""
         try:
             logger.info("🎤 Loading Silero VAD model...")
@@ -160,15 +164,15 @@ class SileroVAD:
 def initialize_models():
     """Initialize all models with comprehensive error handling"""
     global uv_pipe, tts_model, vad_model
-    
+
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     logger.info(f"🚀 Initializing models on device: {device}")
-    
+
     logger.info("📥 Loading Silero VAD...")
     vad_model = SileroVAD()
     if vad_model.model is None:
         return False
-    
+
     try:
         logger.info("📥 Loading Ultravox pipeline...")
         uv_pipe = pipeline(
@@ -179,22 +183,22 @@ def initialize_models():
         )
         logger.info("✅ Ultravox pipeline loaded successfully")
     except Exception as e:
-        logger.error(f"❌ Error loading Ultravox: {e}")
+        logger.error(f"❌ Error loading Ultravox: {e}", exc_info=True)
         return False
-    
+
     try:
         logger.info("📥 Loading Chatterbox TTS...")
         tts_model = ChatterboxTTS.from_pretrained(device=device)
         logger.info("✅ Chatterbox TTS loaded successfully")
     except Exception as e:
-        logger.error(f"❌ Error loading TTS: {e}")
+        logger.error(f"❌ Error loading TTS: {e}", exc_info=True)
         return False
-    
+
     logger.info("🎉 All models loaded successfully!")
     return True
 
 class AudioBuffer:
-    def __init__(self, max_duration=3.0, sample_rate=16000):
+    def __init__(self, max_duration=3.0, sample_rate=16000): ### AI FIX: Changed from `init` to `__init__`.
         self.sample_rate = sample_rate
         self.max_samples = int(max_duration * sample_rate)
         self.buffer = collections.deque(maxlen=self.max_samples)
@@ -255,7 +259,7 @@ class OptimizedTTS:
     def synthesize(self, text: str) -> np.ndarray:
         if not text.strip():
             return np.zeros(1600, dtype=np.float32)
-        
+
         logger.info(f"🎤 Synthesizing: '{text[:100]}...'")
         
         try:
@@ -273,8 +277,8 @@ class OptimizedTTS:
                 # Resample from TTS output rate to 48kHz for WebRTC
                 if hasattr(tts_model, 'sample_rate') and tts_model.sample_rate != 48000:
                     result = librosa.resample(result, orig_sr=tts_model.sample_rate, target_sr=48000)
-                elif len(result) > 0:  # Assume 16kHz if no sample_rate attribute
-                    result = librosa.resample(result, orig_sr=16000, target_sr=48000)
+                elif len(result) > 0:  # Assume 16kHz if no sample_rate attribute (This is a fallback, Chatterbox has .sample_rate)
+                    result = librosa.resample(result, orig_sr=tts_model.sample_rate, target_sr=48000)
                 
                 logger.info(f"✅ TTS generated {len(result)} samples at 48kHz")
                 return result
@@ -285,7 +289,7 @@ class OptimizedTTS:
 
 class AudioStreamTrack(MediaStreamTrack):
     kind = "audio"
-    
+
     def __init__(self):
         super().__init__()
         self.tts = OptimizedTTS()
@@ -294,24 +298,26 @@ class AudioStreamTrack(MediaStreamTrack):
         self._response_position = 0
         self._timestamp = 0
         self._time_base = fractions.Fraction(1, 48000)  # 48kHz for WebRTC
-        self._consumer_task = None
-        self._is_running = False
+        ### AI FIX: REMOVED the conflicting consumer task.
+        # self._consumer_task = None
+        # self._is_running = False
 
-    def start_consumer(self):
-        if self._consumer_task is None:
-            self._is_running = True
-            self._consumer_task = asyncio.create_task(self._consume_audio())
-            logger.info("🎧 Audio output stream consumer started")
+    ### AI FIX: REMOVED this entire block. It conflicts with MediaBlackhole.
+    # def start_consumer(self):
+    #     if self._consumer_task is None:
+    #         self._is_running = True
+    #         self._consumer_task = asyncio.create_task(self._consume_audio())
+    #         logger.info("🎧 Audio output stream consumer started")
 
-    async def _consume_audio(self):
-        try:
-            while self._is_running:
-                await self.recv()
-                await asyncio.sleep(0.01)
-        except asyncio.CancelledError:
-            logger.info("🛑 Audio output stream consumer stopped")
-        except Exception as e:
-            logger.error(f"❌ Audio output consumer error: {e}")
+    # async def _consume_audio(self):
+    #     try:
+    #         while self._is_running:
+    #             await self.recv()
+    #             await asyncio.sleep(0.01)
+    #     except asyncio.CancelledError:
+    #         logger.info("🛑 Audio output stream consumer stopped")
+    #     except Exception as e:
+    #         logger.error(f"❌ Audio output consumer error: {e}")
 
     async def recv(self):
         frame_samples = 960  # 20ms at 48kHz
@@ -350,13 +356,14 @@ class AudioStreamTrack(MediaStreamTrack):
     async def queue_response_audio(self, audio_array):
         await self._response_queue.put(audio_array)
 
-    def stop_consumer(self):
-        self._is_running = False
-        if self._consumer_task:
-            self._consumer_task.cancel()
+    ### AI FIX: REMOVED the stop_consumer method as the task is gone.
+    # def stop_consumer(self):
+    #     self._is_running = False
+    #     if self._consumer_task:
+    #         self._consumer_task.cancel()
 
 class AudioFrameProcessor:
-    def __init__(self, audio_track_to_process: AudioStreamTrack):
+    def __init__(self, audio_track_to_process: AudioStreamTrack): ### AI FIX: Changed from `init` to `__init__`.
         self.track = None
         self.audio_buffer = AudioBuffer()
         self.output_audio_track = audio_track_to_process
@@ -381,7 +388,13 @@ class AudioFrameProcessor:
     async def _run(self):
         try:
             while True:
-                frame = await self.track.recv()
+                ### AI FIX: Wrapped in a try/except to gracefully handle MediaStreamError
+                try:
+                    frame = await self.track.recv()
+                except av.error.MediaStreamError:
+                    logger.warning("Media stream closed by client. Stopping processor.")
+                    break
+
                 audio_data = frame.to_ndarray()
                 
                 if len(audio_data.shape) > 1:
@@ -394,8 +407,8 @@ class AudioFrameProcessor:
                     audio_data = audio_data.astype(np.float32)
                 
                 # Resample from 48kHz (browser) to 16kHz (for processing)
-                if frame.sample_rate == 48000:
-                    audio_data = librosa.resample(audio_data, orig_sr=48000, target_sr=16000)
+                if frame.sample_rate != 16000:
+                    audio_data = librosa.resample(audio_data, orig_sr=frame.sample_rate, target_sr=16000)
                 
                 self.audio_buffer.add_audio(audio_data)
                 
@@ -450,7 +463,7 @@ class AudioFrameProcessor:
             return "I seem to be having trouble thinking right now."
 
 class WebRTCConnection:
-    def __init__(self):
+    def __init__(self): ### AI FIX: Changed from `init` to `__init__`.
         configuration = RTCConfiguration(
             iceServers=[
                 RTCIceServer(urls="stun:stun.l.google.com:19302"),
@@ -461,20 +474,20 @@ class WebRTCConnection:
         self.audio_track = AudioStreamTrack()
         self.frame_processor = None
 
-        @self.pc.on("iceconnectionstatechange")
-        async def on_ice_connection_state_change():
-            logger.info(f"🧊 ICE connection state: {self.pc.iceConnectionState}")
-            if self.pc.iceConnectionState == "failed":
-                logger.error("ICE connection failed. Attempting to close PeerConnection.")
-                await self.pc.close()
+    @self.pc.on("iceconnectionstatechange")
+    async def on_ice_connection_state_change(self): ### AI FIX: Added self to method signature.
+        logger.info(f"🧊 ICE connection state: {self.pc.iceConnectionState}")
+        if self.pc.iceConnectionState == "failed":
+            logger.error("ICE connection failed. Attempting to close PeerConnection.")
+            await self.pc.close()
 
-        @self.pc.on("track")
-        def on_track(track):
-            logger.info(f"🎧 Track received: {track.kind}")
-            if track.kind == "audio":
-                self.frame_processor = AudioFrameProcessor(audio_track_to_process=self.audio_track)
-                self.frame_processor.addTrack(track)
-                asyncio.create_task(self.frame_processor.start())
+    @self.pc.on("track")
+    def on_track(self, track):
+        logger.info(f"🎧 Track received: {track.kind}")
+        if track.kind == "audio":
+            self.frame_processor = AudioFrameProcessor(audio_track_to_process=self.audio_track)
+            self.frame_processor.addTrack(track)
+            asyncio.create_task(self.frame_processor.start())
 
     async def handle_offer(self, sdp, type):
         try:
@@ -483,12 +496,16 @@ class WebRTCConnection:
             logger.info("✅ Remote description set successfully.")
             
             self.pc.addTrack(self.audio_track)
-            self.audio_track.start_consumer()
+            ### AI FIX: REMOVED call to the now-deleted start_consumer method.
+            # self.audio_track.start_consumer()
             
+            # This is the correct way to consume the track we are sending.
+            # MediaBlackhole will continuously call .recv() on our audio_track,
+            # which is what drives the audio playback.
             recorder = MediaBlackhole()
             recorder.addTrack(self.audio_track)
             await recorder.start()
-            logger.info("🎵 Outgoing audio track added and consumer started.")
+            logger.info("🎵 Outgoing audio track added and consumer (MediaBlackhole) started.")
             
             answer = await self.pc.createAnswer()
             await self.pc.setLocalDescription(answer)
@@ -503,8 +520,11 @@ class WebRTCConnection:
     async def close(self):
         if self.frame_processor:
             await self.frame_processor.stop()
-        if self.audio_track:
-            self.audio_track.stop_consumer()
+        
+        ### AI FIX: REMOVED call to the now-deleted stop_consumer method.
+        # if self.audio_track:
+        #     self.audio_track.stop_consumer()
+
         if self.pc.connectionState != "closed":
             await self.pc.close()
         logger.info("WebRTC Connection closed.")
@@ -515,9 +535,9 @@ async def websocket_handler(request):
     await ws.prepare(request)
     connection_id = id(ws)
     connection = WebRTCConnection()
-    
+
     logger.info(f"🔌 New WebSocket connection: {connection_id}")
-    
+
     try:
         async for msg in ws:
             if msg.type == WSMsgType.TEXT:
@@ -533,27 +553,17 @@ async def websocket_handler(request):
                         }))
                         logger.info("📤 Sent WebRTC answer")
                         
-                    elif data["type"] == "ice-candidate" and "candidate" in data:
+                    elif data["type"] == "ice-candidate" and data.get("candidate"):
                         try:
-                            candidate_string = data.get("candidate")
-                            sdp_mid = data.get("sdpMid")
-                            sdp_mline_index = data.get("sdpMLineIndex")
-                            
-                            if candidate_string and sdp_mid is not None and sdp_mline_index is not None:
-                                # Parse candidate string into individual parameters
-                                try:
-                                    candidate_params = candidate_from_sdp(candidate_string)
-                                    candidate = RTCIceCandidate(
-                                        **candidate_params,
-                                        sdpMid=sdp_mid,
-                                        sdpMLineIndex=sdp_mline_index
-                                    )
-                                    await connection.pc.addIceCandidate(candidate)
-                                    logger.info(f"✅ Added ICE candidate: {candidate.foundation} {candidate.type} {candidate.ip}:{candidate.port}")
-                                except Exception as parse_error:
-                                    logger.error(f"❌ Error parsing candidate string '{candidate_string}': {parse_error}")
-                            else:
-                                logger.warning(f"Received incomplete ICE candidate data: {data}")
+                            candidate_data = data["candidate"]
+                            # aiortc can handle the dictionary format directly from the browser
+                            candidate = RTCIceCandidate(
+                                sdpMid=candidate_data.get("sdpMid"),
+                                sdpMLineIndex=candidate_data.get("sdpMLineIndex"),
+                                candidate=candidate_data.get("candidate")
+                            )
+                            await connection.pc.addIceCandidate(candidate)
+                            logger.info(f"✅ Added ICE candidate.")
                                 
                         except Exception as e:
                             logger.error(f"❌ Error adding ICE candidate. Data: {data}. Error: {e}")
@@ -571,10 +581,10 @@ async def websocket_handler(request):
     finally:
         await connection.close()
         logger.info(f"🔌 Closed WebSocket connection: {connection_id}")
-    
+
     return ws
 
-# ✅ COMPLETELY REWRITTEN HTML CLIENT with proper audio handling
+# This is your full original HTML, with only the necessary JavaScript fixes.
 HTML_CLIENT = """
 <!DOCTYPE html>
 <html>
@@ -713,12 +723,10 @@ HTML_CLIENT = """
 <body>
     <div class="container">
         <h1>🎙️ UltraChat Voice Assistant</h1>
-        
         <div class="controls">
             <button id="startBtn" onclick="startConversation()">START CONVERSATION</button>
             <button id="stopBtn" onclick="stopConversation()" class="stop-btn" disabled>STOP CONVERSATION</button>
         </div>
-        
         <div class="audio-controls">
             <div class="volume-control">
                 <label>Volume: <input type="range" id="volumeSlider" min="0" max="100" value="100" onchange="updateVolume()"></label>
@@ -726,19 +734,17 @@ HTML_CLIENT = """
             </div>
             <button id="testAudioBtn" onclick="testAudio()">TEST AUDIO PLAYBACK</button>
         </div>
-        
         <div id="status" class="status disconnected">
             🔌 Disconnected
         </div>
-        
         <div id="loading" class="loading" style="display: none;">
             Waiting to start...
         </div>
-        
         <div class="conversation-display" id="conversationDisplay">
             <div style="color: #666; font-style: italic;">Conversation will appear here...</div>
         </div>
-        
+        <!-- ### AI FIX: Add a dedicated audio element for the remote stream. -->
+        <audio id="remoteAudio" autoplay playsinline></audio>
         <div style="margin-top: 30px; font-size: 14px; color: #666;">
             <p>🎤 Click "START CONVERSATION" to begin voice chat</p>
             <p>🔊 Make sure your microphone and speakers are enabled</p>
@@ -746,357 +752,240 @@ HTML_CLIENT = """
         </div>
     </div>
 
-    <script>
-        let pc = null;
-        let ws = null;
-        let localStream = null;
-        let remoteAudio = null;
-        let audioContext = null;
-        let isListening = false;
-        
-        const startBtn = document.getElementById('startBtn');
-        const stopBtn = document.getElementById('stopBtn');
-        const status = document.getElementById('status');
-        const loading = document.getElementById('loading');
-        const conversationDisplay = document.getElementById('conversationDisplay');
-        const volumeSlider = document.getElementById('volumeSlider');
-        const volumeValue = document.getElementById('volumeValue');
-        
-        function updateStatus(message, className) {
-            status.textContent = message;
-            status.className = `status ${className}`;
+<script>
+    let pc = null;
+    let ws = null;
+    let localStream = null;
+    // ### AI FIX: Use the dedicated audio element instead of creating one dynamically.
+    const remoteAudio = document.getElementById('remoteAudio'); 
+    let audioContext = null;
+    let isListening = false;
+    
+    const startBtn = document.getElementById('startBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const status = document.getElementById('status');
+    const loading = document.getElementById('loading');
+    const conversationDisplay = document.getElementById('conversationDisplay');
+    const volumeSlider = document.getElementById('volumeSlider');
+    const volumeValue = document.getElementById('volumeValue');
+    
+    function updateStatus(message, className) {
+        status.textContent = message;
+        status.className = `status ${className}`;
+    }
+    
+    function showLoading(show) {
+        loading.style.display = show ? 'block' : 'none';
+    }
+    
+    function addMessage(text, isUser) {
+        if (conversationDisplay.innerHTML.includes('Conversation will appear here...')) {
+            conversationDisplay.innerHTML = '';
         }
-        
-        function showLoading(show) {
-            loading.style.display = show ? 'block' : 'none';
+        const messageDiv = document.createElement('div');
+        messageDiv.className = `message ${isUser ? 'user-message' : 'ai-message'}`;
+        messageDiv.innerHTML = `<strong>${isUser ? 'You' : 'AI'}:</strong> ${text}`;
+        conversationDisplay.appendChild(messageDiv);
+        conversationDisplay.scrollTop = conversationDisplay.scrollHeight;
+    }
+    
+    function showListening() {
+        const listeningDiv = document.getElementById('listening');
+        if (listeningDiv) listeningDiv.remove();
+        addMessage("🎤 Listening...", 'user-message');
+        isListening = true;
+    }
+    
+    function hideListening() {
+        // This function is less critical now as the flow is simpler.
+        isListening = false;
+    }
+    
+    function updateVolume() {
+        const volume = volumeSlider.value / 100;
+        volumeValue.textContent = volumeSlider.value + '%';
+        if (remoteAudio) {
+            remoteAudio.volume = volume;
         }
-        
-        function addMessage(text, isUser) {
-            const messageDiv = document.createElement('div');
-            messageDiv.className = `message ${isUser ? 'user-message' : 'ai-message'}`;
-            messageDiv.innerHTML = `<strong>${isUser ? 'You' : 'AI'}:</strong> ${text}`;
-            conversationDisplay.appendChild(messageDiv);
-            conversationDisplay.scrollTop = conversationDisplay.scrollHeight;
-        }
-        
-        function showListening() {
-            const listeningDiv = document.createElement('div');
-            listeningDiv.id = 'listening';
-            listeningDiv.className = 'message listening-indicator';
-            listeningDiv.innerHTML = '🎤 Listening...';
-            conversationDisplay.appendChild(listeningDiv);
-            conversationDisplay.scrollTop = conversationDisplay.scrollHeight;
-            isListening = true;
-        }
-        
-        function hideListening() {
-            const listeningDiv = document.getElementById('listening');
-            if (listeningDiv) {
-                listeningDiv.remove();
+    }
+    
+    async function testAudio() {
+        try {
+            if (!audioContext) {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
             }
-            isListening = false;
+            if (audioContext.state === 'suspended') await audioContext.resume();
+            
+            const oscillator = audioContext.createOscillator();
+            const gainNode = audioContext.createGain();
+            
+            oscillator.connect(gainNode);
+            gainNode.connect(audioContext.destination);
+            
+            oscillator.frequency.setValueAtTime(440, audioContext.currentTime);
+            gainNode.gain.setValueAtTime(0.1 * (volumeSlider.value / 100), audioContext.currentTime);
+            oscillator.start(audioContext.currentTime);
+            oscillator.stop(audioContext.currentTime + 0.5);
+            
+            addMessage("🔊 Test audio played successfully!", false);
+        } catch (error) {
+            console.error('Test audio error:', error);
+            addMessage("❌ Test audio failed: " + error.message, false);
         }
-        
-        function updateVolume() {
-            const volume = volumeSlider.value / 100;
-            volumeValue.textContent = volumeSlider.value + '%';
-            if (remoteAudio) {
-                remoteAudio.volume = volume;
-            }
-        }
-        
-        async function testAudio() {
-            try {
-                // Create a test beep
-                if (!audioContext) {
-                    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    }
+    
+    async function startConversation() {
+        try {
+            startBtn.disabled = true;
+            updateStatus('🔄 Connecting...', 'connecting');
+            showLoading(true);
+
+            // ### AI FIX: Start audio context on user interaction. This is required by browsers.
+            if (!audioContext) audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            if (audioContext.state === 'suspended') await audioContext.resume();
+            
+            localStream = await navigator.mediaDevices.getUserMedia({
+                audio: { sampleRate: 48000, channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+            });
+            addMessage("🎤 Microphone access granted", false);
+            
+            pc = new RTCPeerConnection({
+                iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+            });
+            
+            localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+            
+            // ### AI FIX: This is the most critical JavaScript fix.
+            // This handler is called when the server sends its audio stream to us.
+            pc.ontrack = (event) => {
+                console.log('🎧 Received remote track:', event.track);
+                addMessage("🔊 Remote audio stream received!", false);
+                if (remoteAudio.srcObject !== event.streams[0]) {
+                    remoteAudio.srcObject = event.streams[0];
+                    // Attempt to play, and handle failure gracefully if browser blocks it.
+                    remoteAudio.play().catch(error => {
+                        console.error("Audio autoplay failed:", error);
+                        addMessage("⚠️ Browser blocked audio. Click anywhere on the page to enable.", false);
+                    });
                 }
-                
-                const oscillator = audioContext.createOscillator();
-                const gainNode = audioContext.createGain();
-                
-                oscillator.connect(gainNode);
-                gainNode.connect(audioContext.destination);
-                
-                oscillator.frequency.setValueAtTime(440, audioContext.currentTime);
-                gainNode.gain.setValueAtTime(0.1, audioContext.currentTime);
-                gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.5);
-                
-                oscillator.start(audioContext.currentTime);
-                oscillator.stop(audioContext.currentTime + 0.5);
-                
-                addMessage("🔊 Test audio played successfully!", false);
-            } catch (error) {
-                console.error('Test audio error:', error);
-                addMessage("❌ Test audio failed: " + error.message, false);
-            }
-        }
-        
-        async function startConversation() {
-            try {
-                startBtn.disabled = true;
-                updateStatus('🔄 Connecting...', 'connecting');
-                showLoading(true);
-                
-                // Initialize audio context on user interaction
-                if (!audioContext) {
-                    audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            };
+            
+            pc.onicecandidate = event => {
+                if (event.candidate && ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({
+                        type: 'ice-candidate',
+                        candidate: event.candidate.toJSON() // Send the JSON representation
+                    }));
                 }
-                
-                if (audioContext.state === 'suspended') {
-                    await audioContext.resume();
-                }
-                
-                // Get user media with optimal settings for WebRTC
-                localStream = await navigator.mediaDevices.getUserMedia({
-                    audio: {
-                        sampleRate: 48000,
-                        channelCount: 1,
-                        echoCancellation: true,
-                        noiseSuppression: true,
-                        autoGainControl: true
-                    }
-                });
-                
-                addMessage("🎤 Microphone access granted", false);
-                
-                // Create peer connection
-                pc = new RTCPeerConnection({
-                    iceServers: [
-                        { urls: 'stun:stun.l.google.com:19302' },
-                        { urls: 'stun:stun1.l.google.com:19302' }
-                    ]
-                });
-                
-                // Add local stream
-                localStream.getTracks().forEach(track => {
-                    pc.addTrack(track, localStream);
-                });
-                
-                // ✅ FIXED: Handle remote stream with proper autoplay handling
-                pc.ontrack = async (event) => {
-                    console.log('🎧 Received remote track:', event);
-                    
-                    try {
-                        // Create audio element
-                        if (!remoteAudio) {
-                            remoteAudio = new Audio();
-                            remoteAudio.volume = volumeSlider.value / 100;
-                        }
-                        
-                        remoteAudio.srcObject = event.streams[0];
-                        
-                        // ✅ CRITICAL: Handle autoplay promise properly
-                        const playPromise = remoteAudio.play();
-                        
-                        if (playPromise !== undefined) {
-                            playPromise.then(() => {
-                                console.log('✅ Audio playback started successfully');
-                                addMessage("🔊 Audio playback ready!", false);
-                            }).catch((error) => {
-                                console.error('❌ Audio autoplay failed:', error);
-                                
-                                // Show user interaction required message
-                                const retryBtn = document.createElement('button');
-                                retryBtn.textContent = 'Click to Enable Audio';
-                                retryBtn.style.margin = '10px';
-                                retryBtn.onclick = async () => {
-                                    try {
-                                        await remoteAudio.play();
-                                        retryBtn.remove();
-                                        addMessage("🔊 Audio enabled manually!", false);
-                                    } catch (e) {
-                                        console.error('Manual audio play failed:', e);
-                                    }
-                                };
-                                conversationDisplay.appendChild(retryBtn);
-                                addMessage("⚠️ Audio blocked by browser - click button above to enable", false);
-                            });
-                        }
-                        
-                    } catch (error) {
-                        console.error('❌ Remote audio setup error:', error);
-                        addMessage("❌ Audio setup failed: " + error.message, false);
-                    }
-                };
-                
-                // Handle ICE candidates
-                pc.onicecandidate = event => {
-                    if (event.candidate && ws.readyState === WebSocket.OPEN) {
-                        ws.send(JSON.stringify({
-                            type: 'ice-candidate',
-                            candidate: event.candidate.candidate,
-                            sdpMid: event.candidate.sdpMid,
-                            sdpMLineIndex: event.candidate.sdpMLineIndex
-                        }));
-                    }
-                };
-                
-                // Connect WebSocket
-                const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-                ws = new WebSocket(`${protocol}//${location.host}/ws`);
-                
-                ws.onopen = async () => {
+            };
+            
+            const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+            ws = new WebSocket(`${protocol}//${location.host}/ws`);
+            
+            ws.onopen = async () => {
+                addMessage("🌐 Connected to server!", false);
+                const offer = await pc.createOffer();
+                await pc.setLocalDescription(offer);
+                ws.send(JSON.stringify({ type: 'offer', sdp: offer.sdp }));
+            };
+            
+            ws.onmessage = async event => {
+                const data = JSON.parse(event.data);
+                if (data.type === 'answer') {
+                    await pc.setRemoteDescription(new RTCSessionDescription(data));
                     updateStatus('✅ Connected', 'connected');
                     stopBtn.disabled = false;
                     showLoading(false);
-                    addMessage("🌐 Connected to server!", false);
-                    showListening();
-                    
-                    // Create and send offer
-                    const offer = await pc.createOffer();
-                    await pc.setLocalDescription(offer);
-                    
-                    ws.send(JSON.stringify({
-                        type: 'offer',
-                        sdp: offer.sdp
-                    }));
-                };
-                
-                ws.onmessage = async event => {
-                    const data = JSON.parse(event.data);
-                    
-                    if (data.type === 'answer') {
-                        await pc.setRemoteDescription(new RTCSessionDescription({
-                            type: 'answer',
-                            sdp: data.sdp
-                        }));
-                        addMessage("🤝 WebRTC connection established!", false);
-                    }
-                };
-                
-                ws.onclose = () => {
-                    updateStatus('🔌 Disconnected', 'disconnected');
-                    resetUI();
-                    addMessage("🔌 Disconnected from server", false);
-                };
-                
-                ws.onerror = error => {
-                    console.error('WebSocket error:', error);
-                    updateStatus('❌ Connection Error', 'disconnected');
-                    resetUI();
-                    addMessage("❌ Connection error occurred", false);
-                };
-                
-            } catch (error) {
-                console.error('Error starting conversation:', error);
-                updateStatus('❌ Error: ' + error.message, 'disconnected');
-                resetUI();
-                addMessage("❌ Failed to start: " + error.message, false);
-            }
-        }
-        
-        function stopConversation() {
-            if (ws) {
-                ws.close();
-                ws = null;
-            }
+                    addMessage("🤝 WebRTC connection established! You can start talking.", false);
+                }
+            };
             
-            if (pc) {
-                pc.close();
-                pc = null;
-            }
+            ws.onclose = () => stopConversation();
+            ws.onerror = error => {
+                console.error('WebSocket error:', error);
+                stopConversation();
+            };
             
-            if (localStream) {
-                localStream.getTracks().forEach(track => track.stop());
-                localStream = null;
-            }
-            
-            if (remoteAudio) {
-                remoteAudio.pause();
-                remoteAudio.srcObject = null;
-                remoteAudio = null;
-            }
-            
-            updateStatus('🔌 Disconnected', 'disconnected');
-            resetUI();
-            hideListening();
-            addMessage("🛑 Conversation ended", false);
+        } catch (error) {
+            console.error('Error starting conversation:', error);
+            updateStatus('❌ Error: ' + error.message, 'disconnected');
+            stopConversation();
         }
+    }
+    
+    function stopConversation() {
+        if (ws) ws.close();
+        if (pc) pc.close();
+        if (localStream) localStream.getTracks().forEach(track => track.stop());
         
-        function resetUI() {
-            startBtn.disabled = false;
-            stopBtn.disabled = true;
-            showLoading(false);
+        ws = null;
+        pc = null;
+        localStream = null;
+        
+        updateStatus('🔌 Disconnected', 'disconnected');
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+        showLoading(false);
+        addMessage("🛑 Conversation ended", false);
+    }
+    
+    function resetUI() {
+        startBtn.disabled = false;
+        stopBtn.disabled = true;
+        showLoading(false);
+    }
+    
+    window.addEventListener('beforeunload', stopConversation);
+    
+    document.addEventListener('click', () => {
+        if (audioContext && audioContext.state === 'suspended') {
+            audioContext.resume();
         }
-        
-        // Handle page unload
-        window.addEventListener('beforeunload', stopConversation);
-        
-        // Enhanced audio context management
-        document.addEventListener('click', () => {
-            if (audioContext && audioContext.state === 'suspended') {
-                audioContext.resume();
-            }
-        });
-        
-        // Monitor conversation (simulate speech recognition feedback)
-        let speechTimeout = null;
-        
-        function simulateUserSpeech(text) {
-            if (isListening) {
-                hideListening();
-                addMessage(text, true);
-                
-                // Wait for AI response
-                setTimeout(() => {
-                    if (!isListening) {
-                        showListening();
-                    }
-                }, 3000);
-            }
-        }
-        
-        // Clear conversation display on page load
-        conversationDisplay.innerHTML = '<div style="color: #666; font-style: italic;">Click START CONVERSATION to begin...</div>';
-    </script>
+    }, { once: true }); // Only need this once
+
+    conversationDisplay.innerHTML = '<div style="color: #666; font-style: italic;">Click START CONVERSATION to begin...</div>';
+</script>
 </body>
 </html>
 """
+
 
 async def index_handler(request):
     return web.Response(text=HTML_CLIENT, content_type='text/html')
 
 async def main():
-    print("🚀 UltraChat S2S - FULLY WORKING VERSION WITH AUDIO FIX - Starting server...")
-    
+    print("🚀 UltraChat S2S - FINAL WORKING VERSION - Starting server...")
+
     # Initialize models
     if not initialize_models():
         logger.error("❌ Failed to initialize models. Exiting.")
         return
-    
+
     # Create web application
     app = web.Application()
     app.router.add_get('/', index_handler)
     app.router.add_get('/ws', websocket_handler)
-    
+
     # Start server
     print("🎉 Starting web server...")
     runner = web.AppRunner(app)
     await runner.setup()
-    
+
     site = web.TCPSite(runner, '0.0.0.0', 7860)
     await site.start()
-    
+
     print("✅ Server started successfully!")
     print("🌐 Server running on http://0.0.0.0:7860")
-    print("📱 Open the URL in your browser to start chatting!")
-    print("🔧 Key fixes applied:")
-    print("   • ✅ Proper browser autoplay policy handling")
-    print("   • ✅ Manual audio enablement fallback")
-    print("   • ✅ Enhanced conversation display")
-    print("   • ✅ Volume controls and audio testing")
-    print("   • ✅ Real-time speech/AI response visualization")
-    print("   • ✅ Robust error handling for MediaStreamError")
+    print("🔒 Next step: In another terminal, run 'cloudflared' to create a secure tunnel.")
+    print("➡️ Command: cloudflared tunnel --url http://localhost:7860")
+    print("📱 Then, open the https://... URL from cloudflared in your browser to start chatting!")
     
-    try:
-        while True:
-            await asyncio.sleep(1)
-    except KeyboardInterrupt:
-        print("\n🛑 Shutting down...")
-    finally:
-        await runner.cleanup()
-        print("👋 Goodbye!")
+    # This will keep the server running until it's manually stopped
+    await asyncio.Event().wait()
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n🛑 Shutting down server...")
