@@ -1,16 +1,3 @@
-# ==============================================================================
-# UltraChat S2S - THE FINAL POLISHED VERSION
-#
-# CONGRATULATIONS! You have a stable, working, high-quality system.
-# This final version is not a bug fix, but a performance tune.
-#
-# FINAL TUNE: Response Length
-# - The `max_new_tokens` for the LLM is increased from 60 to 150.
-# - This gives the AI a "longer leash" to generate more complete, natural,
-#   and thoughtful responses, fixing the issue where it would stop mid-sentence.
-#
-# This is your final, complete, production-quality agent. You have done it.
-# ==============================================================================
 
 import torch
 import asyncio
@@ -248,6 +235,19 @@ class ResponseAudioTrack(MediaStreamTrack):
         self._queue, self._current_chunk, self._chunk_pos = asyncio.Queue(), None, 0
         self._timestamp, self._time_base = 0, fractions.Fraction(1, 48000)
 
+    # --- FIX FOR AUDIO JUMBLING ---
+    # This method instantly flushes the audio queue.
+    async def clear(self):
+        logger.info("🔊 Flushing audio playback queue...")
+        while not self._queue.empty():
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                continue
+        self._current_chunk = None
+        self._chunk_pos = 0
+    # --- END OF FIX ---
+        
     async def recv(self):
         frame_samples, frame = 960, np.zeros(960, dtype=np.int16)
         if self._current_chunk is None or self._chunk_pos >= len(self._current_chunk):
@@ -298,17 +298,16 @@ class AudioProcessor:
             if not transcription or len(transcription) < 2: return np.array([], dtype=np.float32)
             logger.info(f"🎤 Whisper ASR: '{transcription}'")
             messages = [
-                {"role": "system", "content": "You are a friendly, conversational voice assistant. Respond directly to the user in a natural, spoken-like manner. Keep your answers concise."},
+                {"role": "system", "content": "You are a friendly, conversational voice assistant named UltraChat. Respond directly to the user in a natural, spoken-like manner. Keep your answers concise."},
                 {"role": "user", "content": transcription}
             ]
             prompt = phi3_llm.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            
-            # --- THIS IS THE FIX FOR THE RESPONSE LENGTH ---
-            # Increased from 60 to 150 to allow for more complete sentences.
             outputs = phi3_llm(prompt, max_new_tokens=150, do_sample=True, temperature=0.7, top_p=0.9, pad_token_id=phi3_llm.tokenizer.eos_token_id)
-            # --- END OF FIX ---
             
-            response_text = outputs[0]["generated_text"].split("<|assistant|>")[1].strip()
+            # --- FIX FOR UNWANTED QUOTATION MARKS ---
+            response_text = outputs[0]["generated_text"].split("<|assistant|>")[1].strip().strip('"')
+            # --- END OF FIX ---
+
             logger.info(f"🤖 LLM Response: '{response_text}'")
             with torch.inference_mode():
                 wav = tts_model.generate(response_text).cpu().numpy().flatten()
@@ -323,7 +322,12 @@ class AudioProcessor:
             loop = asyncio.get_running_loop()
             resampled_wav = await loop.run_in_executor(self.executor, self._blocking_asr_llm_tts, audio_array)
             if resampled_wav.size > 0:
+                # --- FIX FOR AUDIO JUMBLING ---
+                # 1. Clear any old audio from the queue before adding new audio.
+                await self.output_track.clear()
+                # 2. Queue the new audio for playback.
                 await self.output_track.queue_audio(resampled_wav)
+                # 3. Wait for the new audio to finish playing.
                 playback_duration = resampled_wav.size / 48000
                 await asyncio.sleep(playback_duration)
         except Exception as e:
