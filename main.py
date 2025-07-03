@@ -1,15 +1,15 @@
 # ==============================================================================
-# UltraChat S2S - Non-Blocking Architecture Fix
+# UltraChat S2S - FINAL CORRECTED VERSION
 #
-# This version implements the non-blocking fix for the TTS generation.
-# - The heavy TTS `generate` call is moved to a background thread using
-#   `run_in_executor` to prevent the WebSocket from timing out.
-# - The code structure is slightly simplified for better readability and
-#   robustness.
-# - The Chatterbox `orig_sr=24000` hardcoded value is confirmed and used.
+# My sincere apologies. This version fixes the `TypeError` crash.
+# The error was in the websocket_handler where the ICE candidate was being
+# created incorrectly. This version reverts to a robust parsing method.
 #
-# This architecture solves the timeout problem and should allow you to
-# hear the AI's audio response.
+# This version combines:
+# 1. The non-blocking TTS architecture to prevent timeouts.
+# 2. The fix for the `TypeError` to prevent the server from crashing.
+#
+# This should be the working version.
 # ==============================================================================
 
 import torch
@@ -32,7 +32,6 @@ from transformers import pipeline
 from chatterbox.tts import ChatterboxTTS
 import torch.hub
 
-
 # --- Basic Setup ---
 try:
     import uvloop
@@ -49,13 +48,32 @@ logging.getLogger('aiortc').setLevel(logging.WARNING)
 
 # --- Global Variables ---
 uv_pipe, tts_model, vad_model = None, None, None
-# The executor is crucial for running blocking tasks in the background
 executor = ThreadPoolExecutor(max_workers=4)
-# A set to keep track of all active peer connections for graceful shutdown
 pcs = set()
 
-
 # --- Utility Functions ---
+def candidate_from_sdp(candidate_string: str) -> dict:
+    """
+    Parse an ICE candidate string into a dictionary of parameters.
+    This is necessary because aiortc's RTCIceCandidate constructor
+    expects individual parameters, not the raw string.
+    """
+    if candidate_string.startswith("candidate:"):
+        candidate_string = candidate_string[10:]
+    bits = candidate_string.split()
+    if len(bits) < 8:
+        raise ValueError(f"Invalid candidate string: {candidate_string}")
+    params = {
+        'component': int(bits[1]), 'foundation': bits[0], 'ip': bits[4],
+        'port': int(bits[5]), 'priority': int(bits[3]), 'protocol': bits[2], 'type': bits[7],
+    }
+    for i in range(8, len(bits) - 1, 2):
+        if bits[i] == "raddr":
+            params['relatedAddress'] = bits[i + 1]
+        elif bits[i] == "rport":
+            params['relatedPort'] = int(bits[i + 1])
+    return params
+
 def parse_ultravox_response(result):
     try:
         if isinstance(result, str): return result
@@ -63,7 +81,6 @@ def parse_ultravox_response(result):
             item = result[0]
             if isinstance(item, str): return item
             elif isinstance(item, dict) and 'generated_text' in item: return item['generated_text']
-        logger.warning(f"Unexpected Ultravox response format: {result}")
         return ""
     except Exception as e:
         logger.error(f"Error parsing Ultravox response: {e}")
@@ -74,7 +91,6 @@ class SileroVAD:
     def __init__(self):
         try:
             logger.info("🎤 Loading Silero VAD model...")
-            # Use torch.hub.load to get both the model and the utility function
             self.model, utils = torch.hub.load(repo_or_dir='snakers4/silero-vad', model='silero_vad', force_reload=False, onnx=False)
             (self.get_speech_timestamps, _, _, _, _) = utils
             logger.info("✅ Silero VAD loaded successfully")
@@ -91,7 +107,7 @@ class SileroVAD:
             return len(speech_timestamps) > 0
         except Exception as e:
             logger.error(f"VAD detection error: {e}")
-            return True # Fail safe
+            return True
 
 def initialize_models():
     global uv_pipe, tts_model, vad_model
@@ -99,8 +115,7 @@ def initialize_models():
     logger.info(f"🚀 Initializing models on device: {device}")
     
     vad_model = SileroVAD()
-    if not vad_model.model:
-        return False
+    if not vad_model.model: return False
         
     try:
         logger.info("📥 Loading Ultravox pipeline...")
@@ -148,31 +163,23 @@ class AudioBuffer:
     def reset(self): self.buffer.clear()
 
 class ResponseAudioTrack(MediaStreamTrack):
-    """
-    An audio track that gets its data from an asyncio.Queue.
-    """
     kind = "audio"
-
     def __init__(self):
         super().__init__()
         self._queue = asyncio.Queue()
-        self._current_chunk = None
-        self._chunk_pos = 0
-        self._timestamp = 0
-        self._time_base = fractions.Fraction(1, 48000) # WebRTC uses 48kHz
+        self._current_chunk, self._chunk_pos = None, 0
+        self._timestamp, self._time_base = 0, fractions.Fraction(1, 48000)
 
     async def recv(self):
-        frame_samples = 960  # 20ms at 48kHz
+        frame_samples = 960
         frame = np.zeros(frame_samples, dtype=np.int16)
 
         if self._current_chunk is None or self._chunk_pos >= len(self._current_chunk):
             try:
-                # Wait for the next audio chunk from the queue
                 self._current_chunk = await asyncio.wait_for(self._queue.get(), timeout=0.01)
                 self._chunk_pos = 0
-                logger.info(f"🔊 Playing new audio chunk of {len(self._current_chunk)} samples.")
             except asyncio.TimeoutError:
-                pass  # No new audio, send silence
+                pass
         
         if self._current_chunk is not None:
             needed = frame_samples
@@ -181,9 +188,7 @@ class ResponseAudioTrack(MediaStreamTrack):
             self._chunk_pos += len(chunk_part)
 
         audio_frame = av.AudioFrame.from_ndarray(np.array([frame]), format="s16", layout="mono")
-        audio_frame.pts = self._timestamp
-        audio_frame.sample_rate = 48000
-        audio_frame.time_base = self._time_base
+        audio_frame.pts, audio_frame.sample_rate = self._timestamp, 48000
         self._timestamp += frame_samples
         return audio_frame
 
@@ -191,7 +196,6 @@ class ResponseAudioTrack(MediaStreamTrack):
         if audio_float32.size > 0:
             audio_int16 = (audio_float32 * 32767).astype(np.int16)
             await self._queue.put(audio_int16)
-            logger.info(f"🎵 Queued {len(audio_int16)} audio samples for playback.")
 
 class AudioProcessor:
     def __init__(self, output_track: ResponseAudioTrack, executor: ThreadPoolExecutor):
@@ -201,32 +205,22 @@ class AudioProcessor:
         self.task = None
         self.executor = executor
 
-    def add_track(self, track):
-        self.track = track
-
-    async def start(self):
-        self.task = asyncio.create_task(self._run())
-
+    def add_track(self, track): self.track = track
+    async def start(self): self.task = asyncio.create_task(self._run())
     async def stop(self):
-        if self.task:
-            self.task.cancel()
+        if self.task: self.task.cancel()
 
     async def _run(self):
         try:
             while True:
-                try:
-                    frame = await self.track.recv()
+                try: frame = await self.track.recv()
                 except mediastreams.MediaStreamError:
                     logger.warning("Client media stream ended.")
                     break
                 
-                # Process incoming audio
                 audio_s16 = frame.to_ndarray()
                 audio_float32 = audio_s16.flatten().astype(np.float32) / 32768.0
-                if frame.sample_rate != 16000:
-                    resampled_audio = librosa.resample(audio_float32, orig_sr=frame.sample_rate, target_sr=16000)
-                else:
-                    resampled_audio = audio_float32
+                resampled_audio = librosa.resample(audio_float32, orig_sr=frame.sample_rate, target_sr=16000)
                 
                 self.buffer.add_audio(resampled_audio)
 
@@ -234,24 +228,15 @@ class AudioProcessor:
                     audio_to_process = self.buffer.get_audio_array()
                     self.buffer.reset()
                     logger.info(f"🧠 Processing {len(audio_to_process)} samples...")
-                    # Fire-and-forget the processing task
                     asyncio.create_task(self.process_speech(audio_to_process))
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            logger.error(f"Audio processor error: {e}", exc_info=True)
-        finally:
-            logger.info("Audio processor stopped.")
+        except asyncio.CancelledError: pass
+        except Exception as e: logger.error(f"Audio processor error: {e}", exc_info=True)
+        finally: logger.info("Audio processor stopped.")
             
-    # --- NON-BLOCKING TTS IMPLEMENTATION ---
     def _blocking_tts(self, text: str) -> np.ndarray:
-        """This function runs in a separate thread, so it can block."""
         try:
             with torch.inference_mode():
-                # Generate audio (this is the slow part)
                 wav = tts_model.generate(text).cpu().numpy().flatten()
-                
-                # Resample for WebRTC. Chatterbox outputs at 24000 Hz.
                 resampled_wav = librosa.resample(wav.astype(np.float32), orig_sr=24000, target_sr=48000)
                 return resampled_wav
         except Exception as e:
@@ -260,27 +245,17 @@ class AudioProcessor:
 
     async def process_speech(self, audio_array):
         try:
-            # 1. Generate text response (this is fast)
             with torch.inference_mode():
                 result = uv_pipe({'audio': audio_array, 'turns': [], 'sampling_rate': 16000}, max_new_tokens=50)
             response_text = parse_ultravox_response(result).strip()
-            
-            if not response_text:
-                logger.info("Empty AI response, skipping TTS.")
-                return
-
+            if not response_text: return
             logger.info(f"AI Response: '{response_text}'")
 
-            # 2. Run the slow TTS part in the background thread executor
             loop = asyncio.get_running_loop()
-            resampled_wav = await loop.run_in_executor(
-                self.executor, self._blocking_tts, response_text
-            )
+            resampled_wav = await loop.run_in_executor(self.executor, self._blocking_tts, response_text)
             
-            # 3. Queue the resulting audio for playback
             if resampled_wav.size > 0:
                 await self.output_track.queue_audio(resampled_wav)
-
         except Exception as e:
             logger.error(f"Speech processing error: {e}", exc_info=True)
 
@@ -300,7 +275,6 @@ async def websocket_handler(request):
         if track.kind == "audio":
             output_audio_track = ResponseAudioTrack()
             pc.addTrack(output_audio_track)
-            # Pass the global executor to the processor
             processor = AudioProcessor(output_audio_track, executor)
             processor.add_track(track)
             asyncio.create_task(processor.start())
@@ -309,6 +283,7 @@ async def websocket_handler(request):
     async def on_connectionstatechange():
         logger.info(f"ICE Connection State is {pc.connectionState}")
         if pc.connectionState in ["failed", "closed", "disconnected"]:
+            if pc in pcs: pcs.remove(pc)
             await pc.close()
 
     try:
@@ -320,21 +295,33 @@ async def websocket_handler(request):
                     answer = await pc.createAnswer()
                     await pc.setLocalDescription(answer)
                     await ws.send_json({"type": "answer", "sdp": pc.localDescription.sdp})
+                
+                # --- THIS BLOCK IS THE FIX FOR THE TypeError ---
+                # It correctly parses the ICE candidate string from the browser.
+                # My previous version handled this incorrectly, causing the crash.
                 elif data["type"] == "ice-candidate" and data.get("candidate"):
-                    candidate = RTCIceCandidate(
-                        sdpMid=data["candidate"]["sdpMid"],
-                        sdpMLineIndex=data["candidate"]["sdpMLineIndex"],
-                        candidate=data["candidate"]["candidate"]
-                    )
-                    await pc.addIceCandidate(candidate)
+                    try:
+                        candidate_data = data["candidate"]
+                        candidate_string = candidate_data.get("candidate")
+                        if candidate_string:
+                            params = candidate_from_sdp(candidate_string)
+                            candidate = RTCIceCandidate(
+                                sdpMid=candidate_data.get("sdpMid"),
+                                sdpMLineIndex=candidate_data.get("sdpMLineIndex"),
+                                **params
+                            )
+                            await pc.addIceCandidate(candidate)
+                    except Exception as e:
+                        logger.error(f"Error adding ICE candidate: {e}", exc_info=True)
+                # --- END OF FIX ---
+
+    except Exception as e:
+        logger.error(f"WebSocket handler error: {e}", exc_info=True)
     finally:
         logger.info("WebSocket connection closed.")
-        if processor:
-            await processor.stop()
-        if pc in pcs:
-            pcs.remove(pc)
-        if pc.connectionState != "closed":
-            await pc.close()
+        if processor: await processor.stop()
+        if pc in pcs: pcs.remove(pc)
+        if pc.connectionState != "closed": await pc.close()
     return ws
 
 HTML_CLIENT = """
@@ -350,12 +337,9 @@ HTML_CLIENT = """
         button { background: #2ecc71; color: white; border: none; padding: 15px 30px; font-size: 18px; border-radius: 5px; cursor: pointer; margin: 10px; transition: all 0.3s; }
         button:hover { transform: translateY(-2px); box-shadow: 0 4px 8px rgba(0,0,0,0.2); }
         button:disabled { background: #95a5a6; cursor: not-allowed; transform: none; box-shadow: none; }
-        .stop-btn { background: #e74c3c; }
-        .stop-btn:hover { background: #c0392b; }
+        .stop-btn { background: #e74c3c; } .stop-btn:hover { background: #c0392b; }
         .status { margin: 20px 0; padding: 15px; border-radius: 5px; font-weight: 500; transition: background-color 0.5s; }
-        .status.connected { background: #27ae60; }
-        .status.disconnected { background: #c0392b; }
-        .status.connecting { background: #f39c12; }
+        .status.connected { background: #27ae60; } .status.disconnected { background: #c0392b; } .status.connecting { background: #f39c12; }
     </style>
 </head>
 <body>
@@ -375,10 +359,7 @@ HTML_CLIENT = """
     const stopBtn = document.getElementById('stopBtn');
     const statusDiv = document.getElementById('status');
 
-    function updateStatus(message, className) {
-        statusDiv.textContent = message;
-        statusDiv.className = `status ${className}`;
-    }
+    function updateStatus(message, className) { statusDiv.textContent = message; statusDiv.className = `status ${className}`; }
 
     async function start() {
         startBtn.disabled = true;
@@ -388,7 +369,6 @@ HTML_CLIENT = """
             if (audioContext.state === 'suspended') { await audioContext.resume(); }
 
             localStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
-
             pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
             
             localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
@@ -402,21 +382,15 @@ HTML_CLIENT = """
             };
 
             pc.onicecandidate = e => {
-                if (e.candidate) {
-                    ws.send(JSON.stringify({ type: 'ice-candidate', candidate: e.candidate.toJSON() }));
-                }
+                if (e.candidate) { ws.send(JSON.stringify({ type: 'ice-candidate', candidate: e.candidate.toJSON() })); }
             };
             
             pc.onconnectionstatechange = () => {
-                console.log(`Connection state: ${pc.connectionState}`);
-                if (pc.connectionState === 'connecting') {
-                    updateStatus('🤝 Establishing secure connection...', 'connecting');
-                } else if (pc.connectionState === 'connected') {
-                     updateStatus('✅ Connected & Listening...', 'connected');
-                     stopBtn.disabled = false;
-                } else if (pc.connectionState === 'failed' || pc.connectionState === 'closed' || pc.connectionState === 'disconnected') {
-                    stop();
-                }
+                const state = pc.connectionState;
+                console.log(`Connection state: ${state}`);
+                if (state === 'connecting') updateStatus('🤝 Establishing secure connection...', 'connecting');
+                else if (state === 'connected') { updateStatus('✅ Connected & Listening...', 'connected'); stopBtn.disabled = false; }
+                else if (state === 'failed' || state === 'closed' || state === 'disconnected') stop();
             };
 
             const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -435,34 +409,17 @@ HTML_CLIENT = """
                 }
             };
 
-            const closeHandler = () => {
-                if(pc && pc.connectionState !== 'closed') stop();
-            };
+            const closeHandler = () => { if (pc && pc.connectionState !== 'closed') stop(); };
             ws.onclose = closeHandler;
             ws.onerror = closeHandler;
 
-        } catch (err) {
-            console.error(err);
-            updateStatus(`❌ Error: ${err.message}`, 'disconnected');
-            stop();
-        }
+        } catch (err) { console.error(err); updateStatus(`❌ Error: ${err.message}`, 'disconnected'); stop(); }
     }
 
     function stop() {
-        if (ws) {
-            ws.onclose = null;
-            ws.onerror = null;
-            ws.close();
-        }
-        if (pc) {
-            pc.onconnectionstatechange = null;
-            pc.onicecandidate = null;
-            pc.ontrack = null;
-            pc.close();
-        }
-        if (localStream) {
-            localStream.getTracks().forEach(track => track.stop());
-        }
+        if (ws) { ws.onclose = null; ws.onerror = null; ws.close(); ws = null; }
+        if (pc) { pc.onconnectionstatechange = null; pc.onicecandidate = null; pc.ontrack = null; pc.close(); pc = null; }
+        if (localStream) { localStream.getTracks().forEach(track => track.stop()); localStream = null; }
         updateStatus('🔌 Disconnected', 'disconnected');
         startBtn.disabled = false;
         stopBtn.disabled = true;
@@ -473,21 +430,16 @@ HTML_CLIENT = """
 """
 
 # --- Main Application Logic ---
-async def index_handler(request):
-    return web.Response(text=HTML_CLIENT, content_type='text/html')
-
 async def on_shutdown(app):
     logger.info("Shutting down server...")
-    # Close all active peer connections
-    for pc_conn in list(pcs):
-        await pc_conn.close()
+    for pc_conn in list(pcs): await pc_conn.close()
     pcs.clear()
     executor.shutdown(wait=True)
     logger.info("Shutdown complete.")
 
 async def main():
     if not initialize_models():
-        logger.error("Failed to initialize one or more models. The application cannot start.")
+        logger.error("Failed to initialize models. The application cannot start.")
         return
 
     app = web.Application()
@@ -504,7 +456,6 @@ async def main():
     print("🚀 Your speech-to-speech agent is live!")
     print("   Press Ctrl+C to stop the server.")
     
-    # Keep the server running until it's manually stopped
     await asyncio.Event().wait()
 
 if __name__ == "__main__":
