@@ -1,16 +1,5 @@
-# ==============================================================================
-# UltraChat S2S - THE DEFINITIVE NEXT-GENERATION ARCHITECTURE (CLEANED)
-#
-# My sincerest apologies for the previous error. This is a direct fix for the
-# ModuleNotFoundError.
-#
-# THIS VERSION REMOVES ALL TRACES OF THE OLD `ChatterboxTTS` MODEL.
-# - The incorrect `import` statement has been removed.
-# - All logic has been verified to use only Ultravox for ASR/LLM and
-#   Google Gemini for TTS, as you requested.
-#
-# This is the corrected, clean version.
-# ==============================================================================
+
+print("--- RUNNING PRODUCTION-GRADE ARCHITECTURE V6 (Whisper + Phi-3 + Chatterbox) ---")
 
 import torch
 import asyncio
@@ -22,19 +11,14 @@ import warnings
 import collections
 import time
 import librosa
-import os
-import io
-import soundfile as sf
 from concurrent.futures import ThreadPoolExecutor
-
-# New imports for the Google API
-import google.generativeai as genai
 
 from aiohttp import web, WSMsgType
 from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack, RTCIceCandidate, RTCConfiguration, RTCIceServer, mediastreams
 import av
 
 from transformers import pipeline
+from chatterbox.tts import ChatterboxTTS
 import torch.hub
 
 # --- Basic Setup ---
@@ -52,14 +36,14 @@ logging.getLogger('aioice.ice').setLevel(logging.WARNING)
 logging.getLogger('aiortc').setLevel(logging.WARNING)
 
 # --- Global Variables & HTML ---
-ultravox_pipe, vad_model = None, None
+whisper_asr, phi3_llm, tts_model, vad_model = None, None, None, None
 executor = ThreadPoolExecutor(max_workers=4)
 pcs = set()
 HTML_CLIENT = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>UltraChat Voice Assistant (Next-Gen)</title>
+    <title>UltraChat Voice Assistant</title>
     <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #2c3e50; color: #ecf0f1; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
@@ -170,18 +154,6 @@ def candidate_from_sdp(candidate_string: str) -> dict:
         elif bits[i] == "rport": params['relatedPort'] = int(bits[i + 1])
     return params
 
-def parse_ultravox_response(result):
-    try:
-        if isinstance(result, str): return result
-        elif isinstance(result, list) and len(result) > 0:
-            item = result[0]
-            if isinstance(item, str): return item
-            elif isinstance(item, dict) and 'generated_text' in item: return item['generated_text']
-        return ""
-    except Exception as e:
-        logger.error(f"Error parsing Ultravox response: {e}")
-        return ""
-
 # --- Model Loading and VAD ---
 class SileroVAD:
     def __init__(self):
@@ -199,36 +171,33 @@ class SileroVAD:
         try:
             if isinstance(audio_tensor, np.ndarray): audio_tensor = torch.from_numpy(audio_tensor)
             if audio_tensor.abs().max() < 0.01: return False
-            speech_timestamps = self.get_speech_timestamps(audio_tensor, self.model, sampling_rate=sample_rate, min_speech_duration_ms=250, threshold=0.5)
+            speech_timestamps = self.get_speech_timestamps(audio_tensor, self.model, sampling_rate=sample_rate, min_speech_duration_ms=250)
             return len(speech_timestamps) > 0
         except Exception as e:
             logger.error(f"VAD detection error: {e}")
             return True
 
 def initialize_models():
-    global ultravox_pipe, vad_model
+    global whisper_asr, phi3_llm, tts_model, vad_model
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
     logger.info(f"🚀 Initializing models on device: {device} with dtype: {torch_dtype}")
     
-    try:
-        api_key = os.environ.get("GOOGLE_API_KEY")
-        if not api_key:
-            logger.error("❌ GOOGLE_API_KEY environment variable not set. Cannot use Gemini TTS.")
-            return False
-        genai.configure(api_key=api_key)
-        logger.info("✅ Google Gemini API configured successfully.")
-    except Exception as e:
-        logger.error(f"❌ Failed to configure Google API: {e}")
-        return False
-
     vad_model = SileroVAD()
     if not vad_model.model: return False
         
     try:
-        logger.info("📥 Loading Ultravox v0.5 model (`fixie-ai/ultravox-v0.5`)...")
-        ultravox_pipe = pipeline("text-generation", model="fixie-ai/ultravox-v0.5", device_map="auto", torch_dtype=torch_dtype, trust_remote_code=True)
-        logger.info("✅ Ultravox v0.5 loaded successfully")
+        logger.info("📥 Loading Whisper ASR model (`openai/whisper-small.en`)...")
+        whisper_asr = pipeline("automatic-speech-recognition", model="openai/whisper-small.en", device=device, torch_dtype=torch_dtype)
+        logger.info("✅ Whisper ASR loaded successfully")
+        
+        logger.info("📥 Loading Phi-3 Mini LLM (`microsoft/phi-3-mini-4k-instruct`)...")
+        phi3_llm = pipeline("text-generation", model="microsoft/phi-3-mini-4k-instruct", device_map="auto", torch_dtype=torch_dtype, trust_remote_code=True)
+        logger.info("✅ Phi-3 Mini LLM loaded successfully")
+
+        logger.info("📥 Loading Chatterbox TTS...")
+        tts_model = ChatterboxTTS.from_pretrained(device=device)
+        logger.info("✅ Chatterbox TTS loaded successfully")
         
         logger.info("🎉 All models loaded successfully!")
         return True
@@ -268,12 +237,6 @@ class ResponseAudioTrack(MediaStreamTrack):
         self._queue, self._current_chunk, self._chunk_pos = asyncio.Queue(), None, 0
         self._timestamp, self._time_base = 0, fractions.Fraction(1, 48000)
 
-    async def clear(self):
-        while not self._queue.empty():
-            try: self._queue.get_nowait()
-            except asyncio.QueueEmpty: continue
-        self._current_chunk, self._chunk_pos = None, 0
-        
     async def recv(self):
         frame_samples, frame = 960, np.zeros(960, dtype=np.int16)
         if self._current_chunk is None or self._chunk_pos >= len(self._current_chunk):
@@ -293,69 +256,65 @@ class ResponseAudioTrack(MediaStreamTrack):
 class AudioProcessor:
     def __init__(self, output_track: ResponseAudioTrack, executor: ThreadPoolExecutor):
         self.track, self.buffer, self.output_track, self.task, self.executor = None, AudioBuffer(), output_track, None, executor
-        self.processing_task = None
+        self.is_speaking = False
 
     def add_track(self, track): self.track = track
     async def start(self): self.task = asyncio.create_task(self._run())
     async def stop(self):
-        if self.processing_task: self.processing_task.cancel()
         if self.task: self.task.cancel()
 
     async def _run(self):
         try:
             while True:
-                frame = await self.track.recv()
+                if self.is_speaking: await asyncio.sleep(0.1); continue
+                try: frame = await self.track.recv()
+                except mediastreams.MediaStreamError: logger.warning("Client media stream ended."); break
                 audio_float32 = frame.to_ndarray().flatten().astype(np.float32) / 32768.0
                 resampled_audio = librosa.resample(audio_float32, orig_sr=frame.sample_rate, target_sr=16000)
                 self.buffer.add_audio(resampled_audio)
-                
                 if self.buffer.should_process():
-                    if self.processing_task and not self.processing_task.done():
-                        logger.info("🎤 Barge-in detected, cancelling previous task...")
-                        self.processing_task.cancel()
-                    
                     audio_to_process = self.buffer.get_audio_array()
                     self.buffer.reset()
                     logger.info(f"🧠 VAD triggered, processing {len(audio_to_process)} samples...")
-                    self.processing_task = asyncio.create_task(self.process_speech(audio_to_process))
+                    asyncio.create_task(self.process_speech(audio_to_process))
         except asyncio.CancelledError: pass
-        except mediastreams.MediaStreamError: logger.warning("Client media stream ended.")
         except Exception as e: logger.error(f"Audio processor error: {e}", exc_info=True)
         finally: logger.info("Audio processor stopped.")
             
-    def _blocking_ultravox_gemini_tts(self, audio_array) -> np.ndarray:
+    def _blocking_asr_llm_tts(self, audio_array) -> np.ndarray:
         try:
-            turns = [ {"role": "system", "content": "You are a friendly, conversational voice assistant named UltraChat. Keep your answers concise and natural."} ]
-            result = ultravox_pipe({'audio': audio_array, 'turns': turns, 'sampling_rate': 16000}, max_new_tokens=150)
-            response_text = parse_ultravox_response(result).strip().strip('"')
-            if not response_text: return np.array([], dtype=np.float32)
-            logger.info(f"🤖 Ultravox Response: '{response_text}'")
-
-            logger.info("🔊 Requesting audio from Google Gemini TTS API...")
-            response = genai.text_to_speech(model="models/text-to-speech", text=response_text, voice="gemini-1.5-flash")
-            audio_bytes = response['audio_content']
-            audio_data, original_sr = sf.read(io.BytesIO(audio_bytes))
-            logger.info(f"✅ Received audio from Google. Original SR: {original_sr}Hz")
-
-            if original_sr != 48000:
-                audio_data = librosa.resample(audio_data.astype(np.float32), orig_sr=original_sr, target_sr=48000)
-
-            return audio_data
+            # For English-only models, we do not pass any task or language arguments.
+            transcription = whisper_asr(audio_array)["text"].strip()
+            
+            if not transcription or len(transcription) < 2: return np.array([], dtype=np.float32)
+            logger.info(f"🎤 Whisper ASR: '{transcription}'")
+            messages = [{"role": "user", "content": transcription}]
+            prompt = phi3_llm.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+            outputs = phi3_llm(prompt, max_new_tokens=60, do_sample=True, temperature=0.7, top_p=0.9, pad_token_id=phi3_llm.tokenizer.eos_token_id)
+            response_text = outputs[0]["generated_text"].split("<|assistant|>")[1].strip()
+            logger.info(f"🤖 LLM Response: '{response_text}'")
+            with torch.inference_mode():
+                wav = tts_model.generate(response_text).cpu().numpy().flatten()
+                return librosa.resample(wav.astype(np.float32), orig_sr=24000, target_sr=48000)
         except Exception as e:
             logger.error(f"Error in background processing thread: {e}", exc_info=True)
             return np.array([], dtype=np.float32)
 
     async def process_speech(self, audio_array):
         try:
+            self.is_speaking = True
             loop = asyncio.get_running_loop()
-            resampled_wav = await loop.run_in_executor(self.executor, self._blocking_ultravox_gemini_tts, audio_array)
-            await self.output_track.clear()
+            resampled_wav = await loop.run_in_executor(self.executor, self._blocking_asr_llm_tts, audio_array)
             if resampled_wav.size > 0:
                 await self.output_track.queue_audio(resampled_wav)
-        except asyncio.CancelledError:
-            logger.info("Speech processing task was cancelled successfully by barge-in.")
+                playback_duration = resampled_wav.size / 48000
+                await asyncio.sleep(playback_duration)
         except Exception as e:
             logger.error(f"Speech processing error: {e}", exc_info=True)
+        finally:
+            self.buffer.reset()
+            self.is_speaking = False
+            logger.info("✅ Cooldown complete, now listening.")
 
 # --- WebRTC and WebSocket Handling ---
 async def websocket_handler(request):
