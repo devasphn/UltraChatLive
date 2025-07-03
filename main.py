@@ -1,21 +1,13 @@
 # ==============================================================================
-# UltraChat S2S - THE NEXT-GENERATION ARCHITECTURE
+# UltraChat S2S - FINAL NEXT-GENERATION ARCHITECTURE
 #
-# This is a full architectural upgrade based on your excellent request.
+# My sincerest apologies. This version fixes the typo in the model name.
 #
-# UPGRADE 1: End-to-End ASR+LLM
-# - Whisper and Phi-3 are replaced with the new `ultravox-v0.6` model.
-# - This is a single, powerful model designed for low-latency voice conversations.
+# THIS VERSION FIXES THE `OSError: Repository Not Found`.
+# - The model name `fixie-ai/ultravox-v0_6` has been corrected to the valid
+#   identifier: `fixie-ai/ultravox-v0.6`.
 #
-# UPGRADE 2: State-of-the-Art Cloud TTS
-# - Chatterbox is replaced with API calls to Google's Gemini TTS.
-# - This provides incredibly natural, high-quality voices.
-#
-# UPGRADE 3: Secure API Key Handling
-# - The code is designed to securely read your Google API key from an
-#   environment variable.
-#
-# This is the new, state-of-the-art version of your agent.
+# This was a simple but critical typo on my part. This is the corrected version.
 # ==============================================================================
 
 import torch
@@ -217,7 +209,6 @@ def initialize_models():
     torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
     logger.info(f"🚀 Initializing models on device: {device} with dtype: {torch_dtype}")
     
-    # 1. Configure Google API
     try:
         api_key = os.environ.get("GOOGLE_API_KEY")
         if not api_key:
@@ -229,14 +220,15 @@ def initialize_models():
         logger.error(f"❌ Failed to configure Google API: {e}")
         return False
 
-    # 2. Load VAD
     vad_model = SileroVAD()
     if not vad_model.model: return False
         
-    # 3. Load Ultravox
     try:
-        logger.info("📥 Loading Ultravox v0.6 model (`fixie-ai/ultravox-v0_6`)...")
-        ultravox_pipe = pipeline("text-generation", model="fixie-ai/ultravox-v0_6", device_map="auto", torch_dtype=torch_dtype, trust_remote_code=True)
+        # --- THIS IS THE FIX FOR THE OSError ---
+        # Corrected `v0_6` to `v0.6`
+        logger.info("📥 Loading Ultravox v0.6 model (`fixie-ai/ultravox-v0.6`)...")
+        ultravox_pipe = pipeline("text-generation", model="fixie-ai/ultravox-v0.6", device_map="auto", torch_dtype=torch_dtype, trust_remote_code=True)
+        # --- END OF FIX ---
         logger.info("✅ Ultravox v0.6 loaded successfully")
         
         logger.info("🎉 All models loaded successfully!")
@@ -317,10 +309,12 @@ class AudioProcessor:
                 audio_float32 = frame.to_ndarray().flatten().astype(np.float32) / 32768.0
                 resampled_audio = librosa.resample(audio_float32, orig_sr=frame.sample_rate, target_sr=16000)
                 self.buffer.add_audio(resampled_audio)
+                
                 if self.buffer.should_process():
                     if self.processing_task and not self.processing_task.done():
                         logger.info("🎤 Barge-in detected, cancelling previous task...")
                         self.processing_task.cancel()
+                    
                     audio_to_process = self.buffer.get_audio_array()
                     self.buffer.reset()
                     logger.info(f"🧠 VAD triggered, processing {len(audio_to_process)} samples...")
@@ -332,30 +326,18 @@ class AudioProcessor:
             
     def _blocking_ultravox_gemini_tts(self, audio_array) -> np.ndarray:
         try:
-            # 1. Ultravox (ASR + LLM)
-            turns = [
-                {"role": "system", "content": "You are a friendly, conversational voice assistant named UltraChat. Keep your answers concise and natural."}
-            ]
+            turns = [ {"role": "system", "content": "You are a friendly, conversational voice assistant named UltraChat. Keep your answers concise and natural."} ]
             result = ultravox_pipe({'audio': audio_array, 'turns': turns, 'sampling_rate': 16000}, max_new_tokens=150)
             response_text = parse_ultravox_response(result).strip().strip('"')
             if not response_text: return np.array([], dtype=np.float32)
             logger.info(f"🤖 Ultravox Response: '{response_text}'")
 
-            # 2. Google Gemini TTS API Call
             logger.info("🔊 Requesting audio from Google Gemini TTS API...")
-            response = genai.text_to_speech(
-                model="models/text-to-speech",
-                text=response_text,
-                voice="gemini-1.5-flash" # High-quality and fast voice
-            )
-            
-            # 3. Convert API audio bytes to numpy array
+            response = genai.text_to_speech(model="models/text-to-speech", text=response_text, voice="gemini-1.5-flash")
             audio_bytes = response['audio_content']
-            # Use soundfile to read the raw audio bytes (e.g., WAV) into a numpy array
             audio_data, original_sr = sf.read(io.BytesIO(audio_bytes))
             logger.info(f"✅ Received audio from Google. Original SR: {original_sr}Hz")
 
-            # 4. Resample to 48kHz for WebRTC if necessary
             if original_sr != 48000:
                 audio_data = librosa.resample(audio_data.astype(np.float32), orig_sr=original_sr, target_sr=48000)
 
