@@ -1,15 +1,17 @@
 # ==============================================================================
-# UltraChat S2S - ABSOLUTE FINAL CORRECTED VERSION v4
+# UltraChat S2S - FINAL POLISHED VERSION
 #
-# My sincerest apologies for the repeated, unacceptable errors.
+# CONGRATULATIONS! The core is working. This version adds the final polish.
 #
-# THIS VERSION FIXES THE `UnboundLocalError` in the `ResponseAudioTrack.recv` method.
+# THIS VERSION FIXES THE SELF-INTERRUPTION (AUDIO CUTOFF) PROBLEM.
 #
-# The error was caused by the same class of mistake as before: trying to assign
-# and use a variable on the same line. This has been corrected by splitting the
-# logic into simple, sequential steps.
+# A state machine (`self.is_speaking`) is added to the AudioProcessor.
+# - When the AI is about to play audio, it sets its state to "speaking".
+# - While "speaking", it ignores incoming audio from the microphone to prevent
+#   its own voice (acoustic echo) from triggering a new processing cycle.
+# - After it finishes playing the audio, it switches back to "listening".
 #
-# This is the complete file with all previous fixes plus this final one.
+# This should result in smooth, complete audio playback.
 # ==============================================================================
 
 import torch
@@ -66,6 +68,8 @@ HTML_CLIENT = """
         .stop-btn { background: #e74c3c; } .stop-btn:hover { background: #c0392b; }
         .status { margin: 20px 0; padding: 15px; border-radius: 5px; font-weight: 500; transition: background-color 0.5s; }
         .status.connected { background: #27ae60; } .status.disconnected { background: #c0392b; } .status.connecting { background: #f39c12; }
+        .status.speaking { background: #3498db; animation: pulse 2s infinite; }
+        @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(52, 152, 219, 0.7); } 70% { box-shadow: 0 0 0 10px rgba(52, 152, 219, 0); } 100% { box-shadow: 0 0 0 0 rgba(52, 152, 219, 0); } }
     </style>
 </head>
 <body>
@@ -104,18 +108,27 @@ HTML_CLIENT = """
                 if (remoteAudio.srcObject !== e.streams[0]) {
                     remoteAudio.srcObject = e.streams[0];
                     remoteAudio.play().catch(err => console.error("Autoplay failed:", err));
+                    
+                    remoteAudio.onplaying = () => {
+                        updateStatus('🤖 AI Speaking...', 'speaking');
+                    };
+                    remoteAudio.onended = () => {
+                         if(pc.connectionState === 'connected') updateStatus('✅ Listening...', 'connected');
+                    };
                 }
             };
 
             pc.onicecandidate = e => {
-                if (e.candidate) { ws.send(JSON.stringify({ type: 'ice-candidate', candidate: e.candidate.toJSON() })); }
+                if (e.candidate && ws && ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'ice-candidate', candidate: e.candidate.toJSON() }));
+                }
             };
             
             pc.onconnectionstatechange = () => {
                 const state = pc.connectionState;
                 console.log(`Connection state: ${state}`);
                 if (state === 'connecting') updateStatus('🤝 Establishing secure connection...', 'connecting');
-                else if (state === 'connected') { updateStatus('✅ Connected & Listening...', 'connected'); stopBtn.disabled = false; }
+                else if (state === 'connected') { updateStatus('✅ Listening...', 'connected'); stopBtn.disabled = false; }
                 else if (state === 'failed' || state === 'closed' || state === 'disconnected') stop();
             };
 
@@ -267,19 +280,11 @@ class ResponseAudioTrack(MediaStreamTrack):
             except asyncio.TimeoutError:
                 pass
         
-        # --- THIS BLOCK IS THE FIX FOR THE UnboundLocalError ---
-        # The faulty one-liner has been replaced with simple, sequential logic.
         if self._current_chunk is not None:
-            # Determine how many samples to take from the current chunk
             end_pos = self._chunk_pos + frame_samples
             chunk_part = self._current_chunk[self._chunk_pos:end_pos]
-            
-            # Place the extracted part into the frame
             frame[:len(chunk_part)] = chunk_part
-            
-            # Update our position within the chunk
             self._chunk_pos += len(chunk_part)
-        # --- END OF FIX ---
         
         audio_frame = av.AudioFrame.from_ndarray(np.array([frame]), format="s16", layout="mono")
         audio_frame.pts, audio_frame.sample_rate = self._timestamp, 48000
@@ -290,8 +295,11 @@ class ResponseAudioTrack(MediaStreamTrack):
         if audio_float32.size > 0: await self._queue.put((audio_float32 * 32767).astype(np.int16))
 
 class AudioProcessor:
+    # --- ECHO CANCELLATION LOGIC ---
+    # We add a state variable `is_speaking` to manage turns.
     def __init__(self, output_track: ResponseAudioTrack, executor: ThreadPoolExecutor):
         self.track, self.buffer, self.output_track, self.task, self.executor = None, AudioBuffer(), output_track, None, executor
+        self.is_speaking = False # The new state variable
 
     def add_track(self, track): self.track = track
     async def start(self): self.task = asyncio.create_task(self._run())
@@ -301,10 +309,22 @@ class AudioProcessor:
     async def _run(self):
         try:
             while True:
+                # --- ECHO CANCELLATION LOGIC ---
+                # If the AI is speaking, we discard incoming audio frames.
+                if self.is_speaking:
+                    # Drain any frames that might have been buffered
+                    try:
+                        await asyncio.wait_for(self.track.recv(), timeout=0.01)
+                    except asyncio.TimeoutError:
+                        await asyncio.sleep(0.01) # Give other tasks a chance to run
+                    continue
+
                 try: frame = await self.track.recv()
                 except mediastreams.MediaStreamError: logger.warning("Client media stream ended."); break
+                
                 audio_float32 = frame.to_ndarray().flatten().astype(np.float32) / 32768.0
                 resampled_audio = librosa.resample(audio_float32, orig_sr=frame.sample_rate, target_sr=16000)
+                
                 self.buffer.add_audio(resampled_audio)
                 if self.buffer.should_process():
                     audio_to_process = self.buffer.get_audio_array()
@@ -334,8 +354,27 @@ class AudioProcessor:
             loop = asyncio.get_running_loop()
             resampled_wav = await loop.run_in_executor(self.executor, self._blocking_tts, response_text)
 
-            if resampled_wav.size > 0: await self.output_track.queue_audio(resampled_wav)
-        except Exception as e: logger.error(f"Speech processing error: {e}", exc_info=True)
+            if resampled_wav.size > 0:
+                # --- ECHO CANCELLATION LOGIC ---
+                # 1. Set the state to SPEAKING before sending audio.
+                self.is_speaking = True
+                logger.info("🤖 AI is speaking...")
+                
+                # 2. Send the audio to be played.
+                await self.output_track.queue_audio(resampled_wav)
+
+                # 3. Calculate how long the audio will take to play and wait.
+                playback_duration = resampled_wav.size / 48000  # 48kHz sample rate
+                await asyncio.sleep(playback_duration + 0.1)  # Add a small buffer
+
+                # 4. Set the state back to LISTENING.
+                self.is_speaking = False
+                logger.info("✅ AI finished speaking, now listening.")
+
+        except Exception as e:
+            logger.error(f"Speech processing error: {e}", exc_info=True)
+            self.is_speaking = False # Ensure we reset state on error
+
 
 # --- WebRTC and WebSocket Handling ---
 async def websocket_handler(request):
