@@ -1,22 +1,16 @@
 # ==============================================================================
-# UltraChat S2S - THE PRODUCTION-QUALITY UPGRADE
+# UltraChat S2S - FINAL PRODUCTION-GRADE VERSION
 #
-# CONGRATULATIONS. The system works. This is the final tuning for quality.
+# My sincerest apologies for the last error. This is a direct fix for the
+# ValueError from the Whisper model.
 #
-# UPGRADE 1: High-Accuracy English ASR
-# - The ASR model is upgraded from `whisper-base` to `whisper-small.en`.
-# - This model is specifically for English, providing much higher accuracy
-#   and reducing language confusion.
+# THIS VERSION FIXES THE `ValueError: Cannot specify 'task'...`.
 #
-# UPGRADE 2: Robust Echo Cancellation (Final Fix)
-# - The `AudioProcessor` now performs a "hard reset" of the audio buffer
-#   after speaking to instantly clear any lingering echo. This is the final
-#   fix for the audio cutoff issue.
+# The English-only Whisper model (`whisper-small.en`) does not accept the
+# `task` parameter. This version removes that parameter from the ASR call,
+# which was the cause of the crash.
 #
-# UPGRADE 3: Minor Bug Fix
-# - Fixed the `AttributeError` on `pc.id` that occurred during shutdown.
-#
-# This is the final, complete version for a high-quality experience.
+# This file contains all previous upgrades and this final correction.
 # ==============================================================================
 
 import torch
@@ -95,8 +89,12 @@ HTML_CLIENT = """
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');
     const statusDiv = document.getElementById('status');
+    let isAISpeaking = false;
 
-    function updateStatus(message, className) { statusDiv.textContent = message; statusDiv.className = `status ${className}`; }
+    function updateStatus(message, className) {
+        statusDiv.textContent = message;
+        statusDiv.className = `status ${className}`;
+    }
 
     async function start() {
         if(ws || pc) { stop(); }
@@ -205,7 +203,6 @@ def initialize_models():
     if not vad_model.model: return False
         
     try:
-        # --- ASR UPGRADE ---
         logger.info("📥 Loading Whisper ASR model (`openai/whisper-small.en`)...")
         whisper_asr = pipeline("automatic-speech-recognition", model="openai/whisper-small.en", device=device, torch_dtype=torch_dtype)
         logger.info("✅ Whisper ASR loaded successfully")
@@ -302,7 +299,11 @@ class AudioProcessor:
             
     def _blocking_asr_llm_tts(self, audio_array) -> np.ndarray:
         try:
-            transcription = whisper_asr(audio_array, generate_kwargs={"task": "transcribe"})["text"].strip()
+            # --- THIS IS THE FIX FOR THE ValueError ---
+            # For English-only models, we do not pass any task or language arguments.
+            transcription = whisper_asr(audio_array)["text"].strip()
+            # --- END OF FIX ---
+            
             if not transcription or len(transcription) < 2: return np.array([], dtype=np.float32)
             logger.info(f"🎤 Whisper ASR: '{transcription}'")
             messages = [{"role": "user", "content": transcription}]
@@ -329,9 +330,8 @@ class AudioProcessor:
         except Exception as e:
             logger.error(f"Speech processing error: {e}", exc_info=True)
         finally:
-            # --- ROBUST COOLDOWN FIX ---
-            self.buffer.reset() # Instantly clear buffer to kill any echo
-            self.is_speaking = False # Start listening again
+            self.buffer.reset()
+            self.is_speaking = False
             logger.info("✅ Cooldown complete, now listening.")
 
 # --- WebRTC and WebSocket Handling ---
@@ -376,8 +376,7 @@ async def websocket_handler(request):
     except Exception as e:
         logger.error(f"WebSocket handler error: {e}", exc_info=True)
     finally:
-        # --- ATTRIBUTE ERROR FIX ---
-        logger.info(f"Closing connection for pc: {id(pc)}") # Use id(pc) instead of pc.id
+        logger.info(f"Closing connection for pc: {id(pc)}")
         if processor: await processor.stop()
         if pc in pcs: pcs.remove(pc)
         if pc.connectionState != "closed": await pc.close()
