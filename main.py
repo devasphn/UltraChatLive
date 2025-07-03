@@ -169,7 +169,12 @@ class SileroVAD:
         try:
             if isinstance(audio_tensor, np.ndarray): audio_tensor = torch.from_numpy(audio_tensor)
             if audio_tensor.abs().max() < 0.01: return False
-            speech_timestamps = self.get_speech_timestamps(audio_tensor, self.model, sampling_rate=sample_rate, min_speech_duration_ms=250)
+            
+            # --- VAD TUNING ---
+            # Increased threshold to make VAD less sensitive to noise/faint sounds
+            speech_timestamps = self.get_speech_timestamps(audio_tensor, self.model, sampling_rate=sample_rate, min_speech_duration_ms=250, threshold=0.5)
+            # --- END OF TUNING ---
+            
             return len(speech_timestamps) > 0
         except Exception as e:
             logger.error(f"VAD detection error: {e}")
@@ -235,18 +240,11 @@ class ResponseAudioTrack(MediaStreamTrack):
         self._queue, self._current_chunk, self._chunk_pos = asyncio.Queue(), None, 0
         self._timestamp, self._time_base = 0, fractions.Fraction(1, 48000)
 
-    # --- FIX FOR AUDIO JUMBLING ---
-    # This method instantly flushes the audio queue.
     async def clear(self):
-        logger.info("🔊 Flushing audio playback queue...")
         while not self._queue.empty():
-            try:
-                self._queue.get_nowait()
-            except asyncio.QueueEmpty:
-                continue
-        self._current_chunk = None
-        self._chunk_pos = 0
-    # --- END OF FIX ---
+            try: self._queue.get_nowait()
+            except asyncio.QueueEmpty: continue
+        self._current_chunk, self._chunk_pos = None, 0
         
     async def recv(self):
         frame_samples, frame = 960, np.zeros(960, dtype=np.int16)
@@ -267,28 +265,38 @@ class ResponseAudioTrack(MediaStreamTrack):
 class AudioProcessor:
     def __init__(self, output_track: ResponseAudioTrack, executor: ThreadPoolExecutor):
         self.track, self.buffer, self.output_track, self.task, self.executor = None, AudioBuffer(), output_track, None, executor
-        self.is_speaking = False
+        self.processing_task = None
 
     def add_track(self, track): self.track = track
     async def start(self): self.task = asyncio.create_task(self._run())
     async def stop(self):
+        if self.processing_task: self.processing_task.cancel()
         if self.task: self.task.cancel()
 
     async def _run(self):
         try:
             while True:
-                if self.is_speaking: await asyncio.sleep(0.1); continue
-                try: frame = await self.track.recv()
-                except mediastreams.MediaStreamError: logger.warning("Client media stream ended."); break
+                frame = await self.track.recv()
                 audio_float32 = frame.to_ndarray().flatten().astype(np.float32) / 32768.0
                 resampled_audio = librosa.resample(audio_float32, orig_sr=frame.sample_rate, target_sr=16000)
                 self.buffer.add_audio(resampled_audio)
+                
+                # --- THE DEFINITIVE BARGE-IN FIX ---
                 if self.buffer.should_process():
+                    # If a processing task is already running, cancel it.
+                    if self.processing_task and not self.processing_task.done():
+                        logger.info(" barge-in detected, cancelling previous task...")
+                        self.processing_task.cancel()
+                    
                     audio_to_process = self.buffer.get_audio_array()
                     self.buffer.reset()
                     logger.info(f"🧠 VAD triggered, processing {len(audio_to_process)} samples...")
-                    asyncio.create_task(self.process_speech(audio_to_process))
+                    # Start the new processing task
+                    self.processing_task = asyncio.create_task(self.process_speech(audio_to_process))
+                # --- END OF FIX ---
+
         except asyncio.CancelledError: pass
+        except mediastreams.MediaStreamError: logger.warning("Client media stream ended.")
         except Exception as e: logger.error(f"Audio processor error: {e}", exc_info=True)
         finally: logger.info("Audio processor stopped.")
             
@@ -303,11 +311,7 @@ class AudioProcessor:
             ]
             prompt = phi3_llm.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             outputs = phi3_llm(prompt, max_new_tokens=150, do_sample=True, temperature=0.7, top_p=0.9, pad_token_id=phi3_llm.tokenizer.eos_token_id)
-            
-            # --- FIX FOR UNWANTED QUOTATION MARKS ---
             response_text = outputs[0]["generated_text"].split("<|assistant|>")[1].strip().strip('"')
-            # --- END OF FIX ---
-
             logger.info(f"🤖 LLM Response: '{response_text}'")
             with torch.inference_mode():
                 wav = tts_model.generate(response_text).cpu().numpy().flatten()
@@ -318,24 +322,16 @@ class AudioProcessor:
 
     async def process_speech(self, audio_array):
         try:
-            self.is_speaking = True
             loop = asyncio.get_running_loop()
             resampled_wav = await loop.run_in_executor(self.executor, self._blocking_asr_llm_tts, audio_array)
+            # Before playing, clear any old audio that might be in the queue
+            await self.output_track.clear()
             if resampled_wav.size > 0:
-                # --- FIX FOR AUDIO JUMBLING ---
-                # 1. Clear any old audio from the queue before adding new audio.
-                await self.output_track.clear()
-                # 2. Queue the new audio for playback.
                 await self.output_track.queue_audio(resampled_wav)
-                # 3. Wait for the new audio to finish playing.
-                playback_duration = resampled_wav.size / 48000
-                await asyncio.sleep(playback_duration)
+        except asyncio.CancelledError:
+            logger.info("Speech processing task was cancelled successfully.")
         except Exception as e:
             logger.error(f"Speech processing error: {e}", exc_info=True)
-        finally:
-            self.buffer.reset()
-            self.is_speaking = False
-            logger.info("✅ Cooldown complete, now listening.")
 
 # --- WebRTC and WebSocket Handling ---
 async def websocket_handler(request):
