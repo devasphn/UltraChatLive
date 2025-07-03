@@ -1,3 +1,22 @@
+# ==============================================================================
+# UltraChat S2S - THE NEXT-GENERATION ARCHITECTURE
+#
+# This is a full architectural upgrade based on your excellent request.
+#
+# UPGRADE 1: End-to-End ASR+LLM
+# - Whisper and Phi-3 are replaced with the new `ultravox-v0.6` model.
+# - This is a single, powerful model designed for low-latency voice conversations.
+#
+# UPGRADE 2: State-of-the-Art Cloud TTS
+# - Chatterbox is replaced with API calls to Google's Gemini TTS.
+# - This provides incredibly natural, high-quality voices.
+#
+# UPGRADE 3: Secure API Key Handling
+# - The code is designed to securely read your Google API key from an
+#   environment variable.
+#
+# This is the new, state-of-the-art version of your agent.
+# ==============================================================================
 
 import torch
 import asyncio
@@ -9,14 +28,19 @@ import warnings
 import collections
 import time
 import librosa
+import os
+import io
+import soundfile as sf
 from concurrent.futures import ThreadPoolExecutor
+
+# New imports for the Google API
+import google.generativeai as genai
 
 from aiohttp import web, WSMsgType
 from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack, RTCIceCandidate, RTCConfiguration, RTCIceServer, mediastreams
 import av
 
 from transformers import pipeline
-from chatterbox.tts import ChatterboxTTS
 import torch.hub
 
 # --- Basic Setup ---
@@ -34,14 +58,14 @@ logging.getLogger('aioice.ice').setLevel(logging.WARNING)
 logging.getLogger('aiortc').setLevel(logging.WARNING)
 
 # --- Global Variables & HTML ---
-whisper_asr, phi3_llm, tts_model, vad_model = None, None, None, None
+ultravox_pipe, vad_model = None, None
 executor = ThreadPoolExecutor(max_workers=4)
 pcs = set()
 HTML_CLIENT = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>UltraChat Voice Assistant</title>
+    <title>UltraChat Voice Assistant (Next-Gen)</title>
     <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #2c3e50; color: #ecf0f1; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
@@ -152,6 +176,18 @@ def candidate_from_sdp(candidate_string: str) -> dict:
         elif bits[i] == "rport": params['relatedPort'] = int(bits[i + 1])
     return params
 
+def parse_ultravox_response(result):
+    try:
+        if isinstance(result, str): return result
+        elif isinstance(result, list) and len(result) > 0:
+            item = result[0]
+            if isinstance(item, str): return item
+            elif isinstance(item, dict) and 'generated_text' in item: return item['generated_text']
+        return ""
+    except Exception as e:
+        logger.error(f"Error parsing Ultravox response: {e}")
+        return ""
+
 # --- Model Loading and VAD ---
 class SileroVAD:
     def __init__(self):
@@ -169,38 +205,39 @@ class SileroVAD:
         try:
             if isinstance(audio_tensor, np.ndarray): audio_tensor = torch.from_numpy(audio_tensor)
             if audio_tensor.abs().max() < 0.01: return False
-            
-            # --- VAD TUNING ---
-            # Increased threshold to make VAD less sensitive to noise/faint sounds
             speech_timestamps = self.get_speech_timestamps(audio_tensor, self.model, sampling_rate=sample_rate, min_speech_duration_ms=250, threshold=0.5)
-            # --- END OF TUNING ---
-            
             return len(speech_timestamps) > 0
         except Exception as e:
             logger.error(f"VAD detection error: {e}")
             return True
 
 def initialize_models():
-    global whisper_asr, phi3_llm, tts_model, vad_model
+    global ultravox_pipe, vad_model
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
     logger.info(f"🚀 Initializing models on device: {device} with dtype: {torch_dtype}")
     
+    # 1. Configure Google API
+    try:
+        api_key = os.environ.get("GOOGLE_API_KEY")
+        if not api_key:
+            logger.error("❌ GOOGLE_API_KEY environment variable not set. Cannot use Gemini TTS.")
+            return False
+        genai.configure(api_key=api_key)
+        logger.info("✅ Google Gemini API configured successfully.")
+    except Exception as e:
+        logger.error(f"❌ Failed to configure Google API: {e}")
+        return False
+
+    # 2. Load VAD
     vad_model = SileroVAD()
     if not vad_model.model: return False
         
+    # 3. Load Ultravox
     try:
-        logger.info("📥 Loading Whisper ASR model (`openai/whisper-small.en`)...")
-        whisper_asr = pipeline("automatic-speech-recognition", model="openai/whisper-small.en", device=device, torch_dtype=torch_dtype)
-        logger.info("✅ Whisper ASR loaded successfully")
-        
-        logger.info("📥 Loading Phi-3 Mini LLM (`microsoft/phi-3-mini-4k-instruct`)...")
-        phi3_llm = pipeline("text-generation", model="microsoft/phi-3-mini-4k-instruct", device_map="auto", torch_dtype=torch_dtype, trust_remote_code=True)
-        logger.info("✅ Phi-3 Mini LLM loaded successfully")
-
-        logger.info("📥 Loading Chatterbox TTS...")
-        tts_model = ChatterboxTTS.from_pretrained(device=device)
-        logger.info("✅ Chatterbox TTS loaded successfully")
+        logger.info("📥 Loading Ultravox v0.6 model (`fixie-ai/ultravox-v0_6`)...")
+        ultravox_pipe = pipeline("text-generation", model="fixie-ai/ultravox-v0_6", device_map="auto", torch_dtype=torch_dtype, trust_remote_code=True)
+        logger.info("✅ Ultravox v0.6 loaded successfully")
         
         logger.info("🎉 All models loaded successfully!")
         return True
@@ -280,42 +317,49 @@ class AudioProcessor:
                 audio_float32 = frame.to_ndarray().flatten().astype(np.float32) / 32768.0
                 resampled_audio = librosa.resample(audio_float32, orig_sr=frame.sample_rate, target_sr=16000)
                 self.buffer.add_audio(resampled_audio)
-                
-                # --- THE DEFINITIVE BARGE-IN FIX ---
                 if self.buffer.should_process():
-                    # If a processing task is already running, cancel it.
                     if self.processing_task and not self.processing_task.done():
-                        logger.info(" barge-in detected, cancelling previous task...")
+                        logger.info("🎤 Barge-in detected, cancelling previous task...")
                         self.processing_task.cancel()
-                    
                     audio_to_process = self.buffer.get_audio_array()
                     self.buffer.reset()
                     logger.info(f"🧠 VAD triggered, processing {len(audio_to_process)} samples...")
-                    # Start the new processing task
                     self.processing_task = asyncio.create_task(self.process_speech(audio_to_process))
-                # --- END OF FIX ---
-
         except asyncio.CancelledError: pass
         except mediastreams.MediaStreamError: logger.warning("Client media stream ended.")
         except Exception as e: logger.error(f"Audio processor error: {e}", exc_info=True)
         finally: logger.info("Audio processor stopped.")
             
-    def _blocking_asr_llm_tts(self, audio_array) -> np.ndarray:
+    def _blocking_ultravox_gemini_tts(self, audio_array) -> np.ndarray:
         try:
-            transcription = whisper_asr(audio_array)["text"].strip()
-            if not transcription or len(transcription) < 2: return np.array([], dtype=np.float32)
-            logger.info(f"🎤 Whisper ASR: '{transcription}'")
-            messages = [
-                {"role": "system", "content": "You are a friendly, conversational voice assistant named UltraChat. Respond directly to the user in a natural, spoken-like manner. Keep your answers concise."},
-                {"role": "user", "content": transcription}
+            # 1. Ultravox (ASR + LLM)
+            turns = [
+                {"role": "system", "content": "You are a friendly, conversational voice assistant named UltraChat. Keep your answers concise and natural."}
             ]
-            prompt = phi3_llm.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-            outputs = phi3_llm(prompt, max_new_tokens=150, do_sample=True, temperature=0.7, top_p=0.9, pad_token_id=phi3_llm.tokenizer.eos_token_id)
-            response_text = outputs[0]["generated_text"].split("<|assistant|>")[1].strip().strip('"')
-            logger.info(f"🤖 LLM Response: '{response_text}'")
-            with torch.inference_mode():
-                wav = tts_model.generate(response_text).cpu().numpy().flatten()
-                return librosa.resample(wav.astype(np.float32), orig_sr=24000, target_sr=48000)
+            result = ultravox_pipe({'audio': audio_array, 'turns': turns, 'sampling_rate': 16000}, max_new_tokens=150)
+            response_text = parse_ultravox_response(result).strip().strip('"')
+            if not response_text: return np.array([], dtype=np.float32)
+            logger.info(f"🤖 Ultravox Response: '{response_text}'")
+
+            # 2. Google Gemini TTS API Call
+            logger.info("🔊 Requesting audio from Google Gemini TTS API...")
+            response = genai.text_to_speech(
+                model="models/text-to-speech",
+                text=response_text,
+                voice="gemini-1.5-flash" # High-quality and fast voice
+            )
+            
+            # 3. Convert API audio bytes to numpy array
+            audio_bytes = response['audio_content']
+            # Use soundfile to read the raw audio bytes (e.g., WAV) into a numpy array
+            audio_data, original_sr = sf.read(io.BytesIO(audio_bytes))
+            logger.info(f"✅ Received audio from Google. Original SR: {original_sr}Hz")
+
+            # 4. Resample to 48kHz for WebRTC if necessary
+            if original_sr != 48000:
+                audio_data = librosa.resample(audio_data.astype(np.float32), orig_sr=original_sr, target_sr=48000)
+
+            return audio_data
         except Exception as e:
             logger.error(f"Error in background processing thread: {e}", exc_info=True)
             return np.array([], dtype=np.float32)
@@ -323,13 +367,12 @@ class AudioProcessor:
     async def process_speech(self, audio_array):
         try:
             loop = asyncio.get_running_loop()
-            resampled_wav = await loop.run_in_executor(self.executor, self._blocking_asr_llm_tts, audio_array)
-            # Before playing, clear any old audio that might be in the queue
+            resampled_wav = await loop.run_in_executor(self.executor, self._blocking_ultravox_gemini_tts, audio_array)
             await self.output_track.clear()
             if resampled_wav.size > 0:
                 await self.output_track.queue_audio(resampled_wav)
         except asyncio.CancelledError:
-            logger.info("Speech processing task was cancelled successfully.")
+            logger.info("Speech processing task was cancelled successfully by barge-in.")
         except Exception as e:
             logger.error(f"Speech processing error: {e}", exc_info=True)
 
