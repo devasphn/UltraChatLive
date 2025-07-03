@@ -10,8 +10,12 @@ pip install --upgrade pip
 
 pip install torch==2.6.0 torchvision==0.21.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu124
 
-pip install transformers librosa chatterbox-tts gradio numpy scipy huggingface-hub peft accelerate
+pip install transformers librosa chatterbox-tts gradio numpy scipy huggingface-hub peft accelerate sentencepiece 
 
-pip install torch-audiomentations silero-vad aiortc websockets aiohttp aiofiles soundfile webrtcvad pyaudio uvloop
+pip install google-generativeai soundfile
+
+pip install torch-audiomentations silero-vad aiortc websockets aiohttp aiofiles soundfile webrtcvad pyaudio uvloop 
+
+export GOOGLE_API_KEY="YOUR_API_KEY_HERE"
 
 python main.py
