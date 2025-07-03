@@ -1,13 +1,15 @@
 # ==============================================================================
-# UltraChat S2S - FINAL NEXT-GENERATION ARCHITECTURE
+# UltraChat S2S - THE DEFINITIVE NEXT-GENERATION ARCHITECTURE
 #
-# My sincerest apologies. This version fixes the typo in the model name.
+# My sincerest apologies for the previous error. This version implements
+# your correct diagnosis.
 #
-# THIS VERSION FIXES THE `OSError: Repository Not Found`.
-# - The model name `fixie-ai/ultravox-v0_6` has been corrected to the valid
-#   identifier: `fixie-ai/ultravox-v0.6`.
+# THIS VERSION FIXES THE `Repository Not Found` ERROR.
+# - The model `fixie-ai/ultravox-v0.6` was not public.
+# - As you correctly suggested, we are now using the latest public version:
+#   `fixie-ai/ultravox-v0.5`.
 #
-# This was a simple but critical typo on my part. This is the corrected version.
+# This is the corrected version. Thank you for your patience and insight.
 # ==============================================================================
 
 import torch
@@ -225,11 +227,11 @@ def initialize_models():
         
     try:
         # --- THIS IS THE FIX FOR THE OSError ---
-        # Corrected `v0_6` to `v0.6`
-        logger.info("📥 Loading Ultravox v0.6 model (`fixie-ai/ultravox-v0.6`)...")
-        ultravox_pipe = pipeline("text-generation", model="fixie-ai/ultravox-v0.6", device_map="auto", torch_dtype=torch_dtype, trust_remote_code=True)
+        # As you correctly suggested, we use the public v0.5 model.
+        logger.info("📥 Loading Ultravox v0.5 model (`fixie-ai/ultravox-v0.5`)...")
+        ultravox_pipe = pipeline("text-generation", model="fixie-ai/ultravox-v0.5", device_map="auto", torch_dtype=torch_dtype, trust_remote_code=True)
         # --- END OF FIX ---
-        logger.info("✅ Ultravox v0.6 loaded successfully")
+        logger.info("✅ Ultravox v0.5 loaded successfully")
         
         logger.info("🎉 All models loaded successfully!")
         return True
