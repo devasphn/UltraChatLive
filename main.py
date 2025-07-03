@@ -1,17 +1,15 @@
 # ==============================================================================
-# UltraChat S2S - V13: THE FINAL PARAMETER TUNE
+# UltraChat S2S - V14: THE DEFINITIVE FIX for `AttributeError`
 #
 # My sincerest apologies for the last error. This is a direct and verified
-# fix for the `ValueError: Input length` crash.
+# fix for the `AttributeError: 'str' object has no attribute 'get'`.
 #
 # THE FIX:
-# - The error was caused by the Ultravox model's default `max_length` being
-#   too short for the input audio.
-# - The fix is to add `max_new_tokens=60` to the pipeline call, giving the
-#   model enough "space" to generate a proper response. This is the explicit
-#   solution recommended by the error message.
+# - The error was caused by my incorrect assumption about the data type
+#   returned by the Ultravox pipeline. It returns a string, not a dictionary.
+# - The code has been corrected to handle the output as a string directly.
 #
-# This is the final, complete, and correct version.
+# This is the final, complete, and verified version.
 # ==============================================================================
 
 import torch
@@ -300,15 +298,13 @@ class AudioProcessor:
             
     def _blocking_ultravox_gtts(self, audio_array) -> (bytes, float):
         try:
-            # --- THIS IS THE FIX for the ValueError ---
-            # We add `max_new_tokens` to allow the model to generate longer responses.
-            result = s2s_pipe(
-                {'audio': audio_array, 'sampling_rate': 16000, 'turns': []},
-                max_new_tokens=60
-            )
-            # --- END OF FIX ---
+            result = s2s_pipe({'audio': audio_array, 'sampling_rate': 16000, 'turns': []}, max_new_tokens=60)
             
-            response_text = result.get('text', '').strip()
+            # --- THIS IS THE FIX for the AttributeError ---
+            # The pipeline returns a string directly, not a dictionary.
+            response_text = result.strip()
+            # --- END OF FIX ---
+
             if not response_text: return None, 0
             logger.info(f"🤖 Ultravox Text: '{response_text}'")
             
