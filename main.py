@@ -1,17 +1,3 @@
-# ==============================================================================
-# UltraChat S2S - FINAL PRODUCTION-GRADE VERSION
-#
-# My sincerest apologies for the last error. This is a direct fix for the
-# ValueError from the Whisper model.
-#
-# THIS VERSION FIXES THE `ValueError: Cannot specify 'task'...`.
-#
-# The English-only Whisper model (`whisper-small.en`) does not accept the
-# `task` parameter. This version removes that parameter from the ASR call,
-# which was the cause of the crash.
-#
-# This file contains all previous upgrades and this final correction.
-# ==============================================================================
 
 import torch
 import asyncio
@@ -89,12 +75,8 @@ HTML_CLIENT = """
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');
     const statusDiv = document.getElementById('status');
-    let isAISpeaking = false;
 
-    function updateStatus(message, className) {
-        statusDiv.textContent = message;
-        statusDiv.className = `status ${className}`;
-    }
+    function updateStatus(message, className) { statusDiv.textContent = message; statusDiv.className = `status ${className}`; }
 
     async function start() {
         if(ws || pc) { stop(); }
@@ -299,14 +281,18 @@ class AudioProcessor:
             
     def _blocking_asr_llm_tts(self, audio_array) -> np.ndarray:
         try:
-            # --- THIS IS THE FIX FOR THE ValueError ---
-            # For English-only models, we do not pass any task or language arguments.
             transcription = whisper_asr(audio_array)["text"].strip()
-            # --- END OF FIX ---
-            
             if not transcription or len(transcription) < 2: return np.array([], dtype=np.float32)
             logger.info(f"🎤 Whisper ASR: '{transcription}'")
-            messages = [{"role": "user", "content": transcription}]
+            
+            # --- THIS IS THE FIX FOR THE LLM's PERSONA ---
+            # We provide a system prompt to guide the AI's behavior.
+            messages = [
+                {"role": "system", "content": "You are a friendly, conversational voice assistant. Respond directly to the user in a natural, spoken-like manner. Keep your answers concise."},
+                {"role": "user", "content": transcription}
+            ]
+            # --- END OF FIX ---
+            
             prompt = phi3_llm.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
             outputs = phi3_llm(prompt, max_new_tokens=60, do_sample=True, temperature=0.7, top_p=0.9, pad_token_id=phi3_llm.tokenizer.eos_token_id)
             response_text = outputs[0]["generated_text"].split("<|assistant|>")[1].strip()
