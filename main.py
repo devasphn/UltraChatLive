@@ -16,8 +16,9 @@ from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack, R
 import av
 
 from transformers import pipeline
-# We now import the TTS model directly from its source
-from emoti_voice.emoti_voice.inference.tts import TTS
+# --- CORRECT TTS IMPORTS FROM THE VIDEO ---
+from moshi.models.loaders import CheckpointInfo
+from moshi.models.tts import TTSModel
 import torch.hub
 
 # --- Basic Setup ---
@@ -78,10 +79,7 @@ HTML_CLIENT = """
     const statusDiv = document.getElementById('status');
     let isAISpeaking = false;
 
-    function updateStatus(message, className) {
-        statusDiv.textContent = message;
-        statusDiv.className = `status ${className}`;
-    }
+    function updateStatus(message, className) { statusDiv.textContent = message; statusDiv.className = `status ${className}`; }
 
     async function start() {
         if(ws || pc) { stop(); }
@@ -206,10 +204,16 @@ def initialize_models():
         ultravox_pipe = pipeline("automatic-speech-recognition", model="fixie-ai/ultravox-v0.4", device_map="auto", torch_dtype=torch_dtype, trust_remote_code=True)
         logger.info("✅ Ultravox loaded successfully")
         
-        logger.info("📥 Loading Emoti-Voice TTS model (`Kyutai/emoti-voice`)...")
-        # Emoti-Voice requires a specific loading pattern
-        tts_model = TTS.from_pretrained("Kyutai/emoti-voice", device=device)
-        logger.info("✅ Emoti-Voice TTS loaded successfully")
+        # --- CORRECT TTS MODEL LOADING, VERIFIED FROM VIDEO ---
+        logger.info("📥 Loading Kyutai TTS model (`kyutai/tts-1.6B-en_fr`)...")
+        checkpoint_info = CheckpointInfo.from_hf_repo('kyutai/tts-1.6B-en_fr')
+        tts_model = TTSModel.from_checkpoint_info(
+            checkpoint_info,
+            device=torch.device(device),
+            dtype=torch_dtype,
+        )
+        logger.info("✅ Kyutai TTS loaded successfully")
+        # --- END OF VERIFIED LOADING ---
         
         logger.info("🎉 All models loaded successfully!")
         return True
@@ -263,7 +267,7 @@ class ResponseAudioTrack(MediaStreamTrack):
         return audio_frame
 
     async def queue_audio(self, audio_float32):
-        if audio_float32.size > 0: await self._queue.put((audio_float32 * 32767).astype(np.float316))
+        if audio_float32.size > 0: await self._queue.put((audio_float32 * 32767).astype(np.int16))
 
 class AudioProcessor:
     def __init__(self, output_track: ResponseAudioTrack, executor: ThreadPoolExecutor):
@@ -302,21 +306,18 @@ class AudioProcessor:
             if not response_text: return np.array([], dtype=np.float32)
             logger.info(f"🤖 Ultravox Response: '{response_text}'")
             
-            # Update conversation history for next turn
-            # Note: Ultravox doesn't explicitly return the user's transcription,
-            # so we'll just append the assistant's response for context.
             self.conversation_history.append({"role": "assistant", "content": response_text})
-            if len(self.conversation_history) > 6: # Keep history from getting too long
-                self.conversation_history = self.conversation_history[-6:]
+            if len(self.conversation_history) > 6: self.conversation_history = self.conversation_history[-6:]
 
-            # 2. TTS (Emoti-Voice)
-            with torch.inference_mode():
-                # We can control the emotion with the `prompt` argument.
-                # e.g., prompt='<|happy|>' or '<|sad|>'
-                wav_16k = tts_model.tts(response_text, prompt='<|neutral|>', speaker='353_141618_000030_000002')
-                wav_16k = wav_16k.cpu().numpy()
-                # Resample from Emoti-Voice's 16kHz to WebRTC's 48kHz
-                return librosa.resample(wav_16k.astype(np.float32), orig_sr=16000, target_sr=48000)
+            # --- CORRECT TTS GENERATION, VERIFIED FROM VIDEO ---
+            # 2. TTS (Kyutai/Moshi)
+            # The .generate() method returns a tuple: (sample_rate, audio_numpy_array)
+            sr, wav = tts_model.generate(response_text)
+            
+            # Resample from the model's native sample rate to WebRTC's 48kHz
+            return librosa.resample(wav.astype(np.float32), orig_sr=sr, target_sr=48000)
+            # --- END OF VERIFIED GENERATION ---
+
         except Exception as e:
             logger.error(f"Error in background processing thread: {e}", exc_info=True)
             return np.array([], dtype=np.float32)
