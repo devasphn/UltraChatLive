@@ -1,17 +1,3 @@
-# ==============================================================================
-# UltraChat S2S - THE FINAL, WORKING, VERIFIED VERSION
-#
-# My sincerest apologies for the last error. This is a direct fix for the
-# `TypeError: 'Entry' object is not iterable`.
-#
-# THE FIX:
-# - The `prepare_script` function returns a list of Entry objects. The code
-#   was incorrectly taking the first element. It now correctly uses the list.
-# - This list of entries is now correctly passed to the `generate` function.
-#
-# This is the final, complete, and correct implementation. This will work.
-# Thank you for your incredible patience. We have reached the end.
-# ==============================================================================
 
 import torch
 import asyncio
