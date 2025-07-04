@@ -10,9 +10,6 @@ import time
 import librosa
 from concurrent.futures import ThreadPoolExecutor
 import gc
-import psutil
-import threading
-from typing import Optional, List
 
 from aiohttp import web, WSMsgType
 from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack, RTCIceCandidate, RTCConfiguration, RTCIceServer, mediastreams
@@ -34,11 +31,11 @@ except ImportError:
 # GPU Optimizations
 torch.backends.cudnn.benchmark = True
 torch.backends.cudnn.deterministic = False
-torch.set_float32_matmul_precision('medium')  # Use Tensor Cores
+torch.set_float32_matmul_precision('medium')
 
 # Disable unnecessary warnings
 warnings.filterwarnings("ignore")
-logging.basicConfig(level=logging.WARNING)  # Reduced logging for speed
+logging.basicConfig(level=logging.WARNING)
 logger = logging.getLogger(__name__)
 
 # Silence verbose loggers
@@ -50,24 +47,7 @@ uv_pipe, tts_model, vad_model = None, None, None
 executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="audio_proc")
 pcs = set()
 
-# Memory pool for audio processing
-AUDIO_BUFFER_POOL = []
-POOL_SIZE = 10
-
-def get_audio_buffer(size: int) -> np.ndarray:
-    """Reuse audio buffers to reduce GC pressure"""
-    for i, buf in enumerate(AUDIO_BUFFER_POOL):
-        if buf.size >= size:
-            AUDIO_BUFFER_POOL.pop(i)
-            return buf[:size]
-    return np.zeros(size, dtype=np.float32)
-
-def return_audio_buffer(buf: np.ndarray):
-    """Return buffer to pool"""
-    if len(AUDIO_BUFFER_POOL) < POOL_SIZE:
-        AUDIO_BUFFER_POOL.append(buf)
-
-# --- Optimized HTML Client ---
+# --- HTML Client (keeping your existing HTML) ---
 HTML_CLIENT = """
 <!DOCTYPE html>
 <html>
@@ -94,7 +74,6 @@ HTML_CLIENT = """
         .status.connecting { background: #ffaa00; color: #000; }
         .status.speaking { background: #0088ff; animation: pulse 1s infinite; }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
-        .latency { font-size: 12px; color: #888; margin-top: 10px; }
     </style>
 </head>
 <body>
@@ -105,24 +84,18 @@ HTML_CLIENT = """
             <button id="stopBtn" onclick="stop()" class="stop-btn" disabled>STOP</button>
         </div>
         <div id="status" class="status disconnected">🔌 Disconnected</div>
-        <div id="latency" class="latency">Latency: -- ms</div>
         <audio id="remoteAudio" autoplay playsinline></audio>
     </div>
 <script>
-    let pc, ws, localStream, startTime;
+    let pc, ws, localStream;
     const remoteAudio = document.getElementById('remoteAudio');
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');
     const statusDiv = document.getElementById('status');
-    const latencyDiv = document.getElementById('latency');
 
     function updateStatus(message, className) { 
         statusDiv.textContent = message; 
         statusDiv.className = `status ${className}`; 
-    }
-
-    function updateLatency(ms) {
-        latencyDiv.textContent = `Latency: ${ms}ms`;
     }
 
     async function start() {
@@ -131,13 +104,12 @@ HTML_CLIENT = """
         updateStatus('🔄 Connecting...', 'connecting');
         
         try {
-            // Optimized audio constraints for low latency
             localStream = await navigator.mediaDevices.getUserMedia({ 
                 audio: { 
                     echoCancellation: true, 
                     noiseSuppression: true, 
-                    autoGainControl: false,  // Disabled for lower latency
-                    latency: 0.01,  // Request 10ms latency
+                    autoGainControl: false,
+                    latency: 0.01,
                     sampleRate: 48000,
                     channelCount: 1
                 } 
@@ -159,10 +131,6 @@ HTML_CLIENT = """
                     remoteAudio.play().catch(console.error);
                     
                     remoteAudio.onplaying = () => {
-                        if(startTime) {
-                            const latency = Date.now() - startTime;
-                            updateLatency(latency);
-                        }
                         updateStatus('🤖 AI Speaking...', 'speaking');
                     };
                     
@@ -204,8 +172,6 @@ HTML_CLIENT = """
                 const data = JSON.parse(e.data);
                 if (data.type === 'answer' && !pc.currentRemoteDescription) {
                     await pc.setRemoteDescription(new RTCSessionDescription(data));
-                } else if (data.type === 'processing') {
-                    startTime = Date.now();
                 }
             };
 
@@ -227,24 +193,16 @@ HTML_CLIENT = """
         });
         ws = pc = localStream = null;
         updateStatus('🔌 Disconnected', 'disconnected');
-        updateLatency('--');
         startBtn.disabled = false;
         stopBtn.disabled = true;
     }
-
-    // Preload audio context for faster startup
-    window.addEventListener('load', () => {
-        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        document.addEventListener('click', () => audioContext.resume(), { once: true });
-    });
 </script>
 </body>
 </html>
 """
 
-# --- Optimized Utility Functions ---
+# --- Utility Functions ---
 def candidate_from_sdp(candidate_string: str) -> dict:
-    """Optimized SDP parsing"""
     if candidate_string.startswith("candidate:"):
         candidate_string = candidate_string[10:]
     
@@ -262,7 +220,6 @@ def candidate_from_sdp(candidate_string: str) -> dict:
         'type': bits[7]
     }
     
-    # Parse optional attributes
     for i in range(8, len(bits) - 1, 2):
         key = bits[i]
         if key == "raddr":
@@ -273,7 +230,6 @@ def candidate_from_sdp(candidate_string: str) -> dict:
     return params
 
 def parse_ultravox_response(result) -> str:
-    """Fast response parsing"""
     try:
         if isinstance(result, str):
             return result
@@ -304,7 +260,7 @@ class OptimizedSileroVAD:
             self.model.eval()
             self.get_speech_timestamps = utils[0]
             
-            # Warm up the model
+            # Warm up
             dummy_audio = torch.randn(16000).cuda() if torch.cuda.is_available() else torch.randn(16000)
             with torch.no_grad():
                 self.get_speech_timestamps(dummy_audio, self.model, sampling_rate=16000)
@@ -321,11 +277,9 @@ class OptimizedSileroVAD:
             if isinstance(audio_tensor, np.ndarray):
                 audio_tensor = torch.from_numpy(audio_tensor)
             
-            # Move to GPU if available
             if torch.cuda.is_available() and not audio_tensor.is_cuda:
                 audio_tensor = audio_tensor.cuda()
             
-            # Quick amplitude check
             if audio_tensor.abs().max() < 0.005:
                 return False
             
@@ -334,8 +288,8 @@ class OptimizedSileroVAD:
                     audio_tensor, 
                     self.model, 
                     sampling_rate=sample_rate,
-                    min_speech_duration_ms=200,  # Reduced for faster response
-                    threshold=0.3  # Lower threshold for better sensitivity
+                    min_speech_duration_ms=200,
+                    threshold=0.3
                 )
             
             return len(speech_timestamps) > 0
@@ -343,7 +297,7 @@ class OptimizedSileroVAD:
             logger.error(f"VAD error: {e}")
             return True
 
-# --- Ultra-Fast Model Loading ---
+# --- Model Loading ---
 def initialize_models() -> bool:
     global uv_pipe, tts_model, vad_model
     
@@ -352,18 +306,17 @@ def initialize_models() -> bool:
     
     logger.info(f"🚀 Initializing models on {device} with {torch_dtype}")
     
-    # Clear GPU cache
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-        torch.cuda.set_per_process_memory_fraction(0.9)  # Use 90% of GPU memory
+        torch.cuda.set_per_process_memory_fraction(0.9)
     
     try:
-        # 1. Load VAD first (smallest model)
+        # 1. Load VAD
         vad_model = OptimizedSileroVAD()
         if vad_model.model is None:
             return False
         
-        # 2. Load Ultravox with optimizations
+        # 2. Load Ultravox
         logger.info("📥 Loading Ultravox...")
         uv_pipe = pipeline(
             model="fixie-ai/ultravox-v0_4",
@@ -385,7 +338,7 @@ def initialize_models() -> bool:
         
         logger.info("✅ Ultravox loaded and warmed up")
         
-        # 3. Load TTS model
+        # 3. Load TTS
         logger.info("📥 Loading Kyutai TTS...")
         checkpoint_info = CheckpointInfo.from_hf_repo('kyutai/tts-1.6B-en_fr')
         tts_model = TTSModel.from_checkpoint_info(
@@ -394,16 +347,16 @@ def initialize_models() -> bool:
             dtype=torch_dtype
         )
         
-        # Warm up TTS
+        # Warm up TTS with CORRECTED code
         with torch.no_grad():
-            entries = tts_model.prepare_script(["Hello"])
+            entries_list = tts_model.prepare_script(["Hello"])
+            entry = entries_list[0]  # Extract the single Entry object
             voice_path = tts_model.get_voice_path("expresso/ex03-ex01_happy_001_channel1_334s.wav")
             condition_attributes = tts_model.make_condition_attributes([voice_path])
-            tts_model.generate(entries, [condition_attributes])
+            tts_model.generate([entry], [condition_attributes])  # Pass list with single Entry
         
         logger.info("✅ TTS loaded and warmed up")
         
-        # Force garbage collection
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -415,7 +368,7 @@ def initialize_models() -> bool:
         logger.error(f"❌ Model loading failed: {e}")
         return False
 
-# --- Ultra-Fast Audio Processing ---
+# --- Audio Processing Classes ---
 class OptimizedAudioBuffer:
     def __init__(self, max_duration: float = 2.0, sample_rate: int = 16000):
         self.sample_rate = sample_rate
@@ -423,17 +376,15 @@ class OptimizedAudioBuffer:
         self.buffer = np.zeros(self.max_samples, dtype=np.float32)
         self.write_pos = 0
         self.last_process_time = time.time()
-        self.min_speech_samples = int(0.3 * sample_rate)  # Reduced to 300ms
-        self.process_interval = 0.3  # Process every 300ms for lower latency
+        self.min_speech_samples = int(0.3 * sample_rate)
+        self.process_interval = 0.3
     
     def add_audio(self, audio_data: np.ndarray):
-        """Optimized audio addition with circular buffer"""
         if audio_data.dtype != np.float32:
             audio_data = audio_data.astype(np.float32)
             if audio_data.dtype == np.int16:
                 audio_data /= 32768.0
         
-        # Normalize if needed
         max_val = np.abs(audio_data).max()
         if max_val > 1.0:
             audio_data /= max_val
@@ -445,22 +396,18 @@ class OptimizedAudioBuffer:
             self.buffer[self.write_pos:self.write_pos + samples_to_add] = audio_flat
             self.write_pos += samples_to_add
         else:
-            # Circular buffer behavior
             remaining = self.max_samples - self.write_pos
             self.buffer[self.write_pos:] = audio_flat[:remaining]
             self.buffer[:samples_to_add - remaining] = audio_flat[remaining:]
             self.write_pos = samples_to_add - remaining
 
     def get_audio_array(self) -> np.ndarray:
-        """Get current audio data"""
         if self.write_pos < self.max_samples:
             return self.buffer[:self.write_pos].copy()
         else:
-            # Return last max_samples
             return self.buffer.copy()
     
     def should_process(self) -> bool:
-        """Optimized processing decision"""
         current_time = time.time()
         
         if (self.write_pos > self.min_speech_samples and 
@@ -468,57 +415,49 @@ class OptimizedAudioBuffer:
             
             self.last_process_time = current_time
             
-            # Quick amplitude check
             recent_samples = min(self.write_pos, self.min_speech_samples)
             recent_audio = self.buffer[max(0, self.write_pos - recent_samples):self.write_pos]
             
             if np.abs(recent_audio).max() < 0.003:
                 return False
             
-            # Use VAD
             audio_tensor = torch.from_numpy(recent_audio)
             return vad_model.detect_speech(audio_tensor, self.sample_rate)
         
         return False
 
     def reset(self):
-        """Fast buffer reset"""
         self.write_pos = 0
-        # No need to zero the buffer, just reset position
 
 class UltraFastResponseTrack(MediaStreamTrack):
     kind = "audio"
     
     def __init__(self):
         super().__init__()
-        self._queue = asyncio.Queue(maxsize=100)  # Limit queue size
+        self._queue = asyncio.Queue(maxsize=100)
         self._current_chunk = None
         self._chunk_pos = 0
         self._timestamp = 0
-        self._frame_size = 960  # 20ms at 48kHz
+        self._frame_size = 960
     
     async def recv(self):
-        """Ultra-optimized audio frame generation"""
         frame = np.zeros(self._frame_size, dtype=np.int16)
         
-        # Try to get new chunk if current is exhausted
         if self._current_chunk is None or self._chunk_pos >= len(self._current_chunk):
             try:
                 self._current_chunk = await asyncio.wait_for(
-                    self._queue.get(), timeout=0.005  # Very short timeout
+                    self._queue.get(), timeout=0.005
                 )
                 self._chunk_pos = 0
             except asyncio.TimeoutError:
-                pass  # Send silence
+                pass
         
-        # Fill frame with audio data
         if self._current_chunk is not None:
             end_pos = self._chunk_pos + self._frame_size
             chunk_part = self._current_chunk[self._chunk_pos:end_pos]
             frame[:len(chunk_part)] = chunk_part
             self._chunk_pos += len(chunk_part)
         
-        # Create AV frame
         audio_frame = av.AudioFrame.from_ndarray(
             np.array([frame]), format="s16", layout="mono"
         )
@@ -529,13 +468,11 @@ class UltraFastResponseTrack(MediaStreamTrack):
         return audio_frame
     
     async def queue_audio(self, audio_float32: np.ndarray):
-        """Queue audio with overflow protection"""
         if audio_float32.size > 0:
             audio_int16 = (np.clip(audio_float32, -1.0, 1.0) * 32767).astype(np.int16)
             try:
                 self._queue.put_nowait(audio_int16)
             except asyncio.QueueFull:
-                # Drop oldest frames to prevent latency buildup
                 try:
                     self._queue.get_nowait()
                     self._queue.put_nowait(audio_int16)
@@ -567,11 +504,9 @@ class UltraFastAudioProcessor:
                 pass
     
     async def _run(self):
-        """Ultra-optimized main processing loop"""
         try:
             while True:
                 if self.is_speaking:
-                    # During speaking, just consume and discard input
                     try:
                         await asyncio.wait_for(self.track.recv(), timeout=0.005)
                     except asyncio.TimeoutError:
@@ -584,26 +519,22 @@ class UltraFastAudioProcessor:
                     logger.warning("Media stream ended")
                     break
                 
-                # Ultra-fast audio processing
                 audio_data = frame.to_ndarray().flatten().astype(np.float32) / 32768.0
                 
-                # Fast resampling using librosa
                 if frame.sample_rate != 16000:
                     audio_data = librosa.resample(
                         audio_data, 
                         orig_sr=frame.sample_rate, 
                         target_sr=16000,
-                        res_type='kaiser_fast'  # Fastest resampling
+                        res_type='kaiser_fast'
                     )
                 
                 self.buffer.add_audio(audio_data)
                 
-                # Check if we should process (non-blocking)
                 if self.buffer.should_process() and not self.processing_lock.locked():
                     audio_to_process = self.buffer.get_audio_array()
                     self.buffer.reset()
                     
-                    # Process asynchronously without blocking
                     asyncio.create_task(self._process_speech_async(audio_to_process))
         
         except asyncio.CancelledError:
@@ -614,12 +545,10 @@ class UltraFastAudioProcessor:
             logger.info("Audio processor stopped")
     
     async def _process_speech_async(self, audio_array: np.ndarray):
-        """Async wrapper for speech processing"""
         async with self.processing_lock:
             try:
                 self.is_speaking = True
                 
-                # Run processing in thread pool
                 loop = asyncio.get_running_loop()
                 result_audio = await loop.run_in_executor(
                     self.executor, 
@@ -630,9 +559,8 @@ class UltraFastAudioProcessor:
                 if result_audio.size > 0:
                     await self.output_track.queue_audio(result_audio)
                     
-                    # Calculate playback time and wait
                     playback_duration = result_audio.size / 48000
-                    await asyncio.sleep(playback_duration + 0.05)  # Minimal buffer
+                    await asyncio.sleep(playback_duration + 0.05)
             
             except Exception as e:
                 logger.error(f"Speech processing error: {e}")
@@ -641,15 +569,15 @@ class UltraFastAudioProcessor:
                 self.buffer.reset()
     
     def _ultra_fast_asr_llm_tts(self, audio_array: np.ndarray) -> np.ndarray:
-        """Ultra-optimized ASR+LLM+TTS pipeline"""
+        """CORRECTED Ultra-optimized ASR+LLM+TTS pipeline"""
         try:
-            # 1. ASR + LLM (Ultravox) - Optimized
+            # 1. ASR + LLM (Ultravox)
             with torch.inference_mode():
                 result = uv_pipe({
                     'audio': audio_array,
                     'sampling_rate': 16000,
                     'turns': []
-                }, max_new_tokens=30)  # Reduced for speed
+                }, max_new_tokens=30)
             
             response_text = parse_ultravox_response(result).strip()
             if not response_text:
@@ -657,20 +585,29 @@ class UltraFastAudioProcessor:
             
             logger.info(f"Response: '{response_text}'")
             
-            # 2. TTS (Kyutai/Moshi) - Ultra-optimized
+            # 2. TTS (Kyutai/Moshi) - CORRECTED VERSION
             with torch.inference_mode():
-                entries = tts_model.prepare_script([response_text])
+                # a. Prepare script returns a LIST of Entry objects
+                entries_list = tts_model.prepare_script([response_text])
+                
+                # b. Extract the single Entry object from the list
+                entry = entries_list[0]
+                
+                # c. Get voice conditioning
                 voice_path = tts_model.get_voice_path(
                     "expresso/ex03-ex01_happy_001_channel1_334s.wav"
                 )
                 condition_attributes = tts_model.make_condition_attributes([voice_path])
-                results_list = tts_model.generate(entries, [condition_attributes])
                 
+                # d. Generate using single Entry in a list
+                results_list = tts_model.generate([entry], [condition_attributes])
+                
+                # e. Extract result
                 result = results_list[0]
                 wav = result.wav
                 sr = result.sample_rate
                 
-                # Fast resampling to 48kHz
+                # f. Resample if needed
                 if sr != 48000:
                     wav = librosa.resample(
                         wav.astype(np.float32), 
@@ -685,9 +622,9 @@ class UltraFastAudioProcessor:
             logger.error(f"Processing pipeline error: {e}")
             return np.array([], dtype=np.float32)
 
-# --- Optimized WebSocket Handler ---
+# --- WebSocket and Web Handlers ---
 async def websocket_handler(request):
-    ws = web.WebSocketResponse(heartbeat=30, compress=False)  # Disable compression for speed
+    ws = web.WebSocketResponse(heartbeat=30, compress=False)
     await ws.prepare(request)
     
     pc = RTCPeerConnection(RTCConfiguration([
@@ -762,7 +699,7 @@ async def websocket_handler(request):
 async def index_handler(request):
     return web.Response(text=HTML_CLIENT, content_type='text/html')
 
-# --- Optimized Main Application ---
+# --- Main Application ---
 async def on_shutdown(app):
     logger.info("Shutting down...")
     for pc in list(pcs):
@@ -771,13 +708,6 @@ async def on_shutdown(app):
     executor.shutdown(wait=True)
 
 async def main():
-    # Set process priority for better performance
-    try:
-        import os
-        os.nice(-10)  # Higher priority
-    except:
-        pass
-    
     if not initialize_models():
         logger.error("Failed to initialize models")
         return
