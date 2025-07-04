@@ -307,31 +307,29 @@ class AudioProcessor:
         try:
             # 1. ASR + LLM (Ultravox)
             with torch.inference_mode():
-                result = uv_pipe({'audio': audio_array, 'turns': [], 'sampling_rate': 16000}, max_new_tokens=50)
+                result = uv_pipe({'audio': audio_array, 'turns': []}, max_new_tokens=50)
             response_text = parse_ultravox_response(result).strip()
             if not response_text: return np.array([], dtype=np.float32)
             logger.info(f"AI Response: '{response_text}'")
             
-            # --- THIS IS THE FINAL, VERIFIED FIX ---
-            # 2. TTS (Kyutai/Moshi) - Video Verified Method
+            # 2. TTS (Kyutai/Moshi)
             with torch.inference_mode():
+                # --- THIS IS THE FINAL, VERIFIED FIX ---
                 # a. Prepare the text script
                 entries = tts_model.prepare_script([response_text])
 
-                # b. Get a reference voice for conditioning. You can change this to other voices.
-                # See: https://huggingface.co/kyutai/tts-voices/tree/main/expresso
+                # b. Get a reference voice for conditioning.
                 voice_path_str = "expresso/ex03-ex01_happy_001_channel1_334s.wav"
                 voice_path = tts_model.get_voice_path(voice_path_str)
                 
-                # c. Create the necessary condition_attributes
-                condition_attributes = tts_model.make_condition_attributes(voice_path)
+                # c. Create the condition_attributes from a LIST of voice paths
+                condition_attributes = tts_model.make_condition_attributes([voice_path])
 
                 # d. Generate audio using both text entries and attributes
                 sr, wav = tts_model.generate(entries, condition_attributes)
+                # --- END OF FIX ---
                 
-                # e. Resample for WebRTC
                 return librosa.resample(wav.astype(np.float32), orig_sr=sr, target_sr=48000)
-            # --- END OF FIX ---
         except Exception as e:
             logger.error(f"TTS generation failed in background thread: {e}", exc_info=True)
             return np.array([], dtype=np.float32)
@@ -339,6 +337,8 @@ class AudioProcessor:
     async def process_speech(self, audio_array):
         try:
             self.is_speaking = True
+            logger.info("🤖 AI is speaking...")
+            
             loop = asyncio.get_running_loop()
             resampled_wav = await loop.run_in_executor(self.executor, self._blocking_asr_llm_tts, audio_array)
 
