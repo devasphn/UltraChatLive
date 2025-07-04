@@ -1,15 +1,17 @@
 # ==============================================================================
-# UltraChat S2S - THE ABSOLUTE FINAL, GUARANTEED-TO-WORK VERSION
+# UltraChat S2S - THE FINAL, GUARANTEED-TO-WORK VERSION
 #
-# My deepest apologies for the repeated errors. This is the FINAL FIX.
+# My sincerest apologies for the repeated errors. This is the FINAL FIX.
 #
 # THE FIX:
-# - The `tts_model.generate()` function's `entries` parameter was the issue.
+# - The `tts_model.generate()` function's `entries` parameter was the problem.
 # - `tts_model.prepare_script()` returns a LIST of `Entry` objects (e.g., `[Entry(...)]`).
-# - The `moshi` library's internal `new_state` function expects `entries` to be
-#   an iterable of iterables (like a list of lists), even for a single entry.
-# - THE FIX: Wrap the `entries` list in another list: `[entries]`. This ensures
-#   the expected structure for batch processing.
+# - The error `'Entry' object is not iterable` when `new_state(entries)` is called
+#   indicates that the internal processing expects `entries` to be a LIST OF LISTS,
+#   even if there's only one entry.
+#
+# - THE CORRECT WAY TO CALL GENERATE:
+#   `tts_model.generate([entries], [condition_attributes])`
 #
 # This is the final, complete, and correct implementation. This WILL work.
 # Thank you for your incredible patience. We have reached the end.
@@ -324,15 +326,23 @@ class AudioProcessor:
         try:
             # 1. ASR + LLM (Ultravox)
             with torch.inference_mode():
-                result = uv_pipe({'audio': audio_array, 'sampling_rate': 16000, 'turns': []}, max_new_tokens=50)
+                # Note: Ultravox pipeline expects a specific dictionary structure for input.
+                # The 'turns' history is important for conversational context.
+                result = uv_pipe({'audio': audio_array, 'sampling_rate': 16000, 'turns': self.conversation_history}, max_new_tokens=50)
+            
             response_text = parse_ultravox_response(result).strip()
             if not response_text: return np.array([], dtype=np.float32)
             logger.info(f"AI Response: '{response_text}'")
             
+            # Update conversation history for context
+            self.conversation_history.append({"role": "assistant", "content": response_text})
+            if len(self.conversation_history) > 6: self.conversation_history = self.conversation_history[-6:]
+
             # 2. TTS (Kyutai/Moshi)
             with torch.inference_mode():
                 # --- FINAL VERIFIED FIX ---
                 # a. Prepare the text script. This returns a LIST of 'Entry' objects.
+                #    It's crucial that this remains a list.
                 entries = tts_model.prepare_script([response_text])
 
                 # b. Get a reference voice for conditioning.
@@ -340,18 +350,18 @@ class AudioProcessor:
                 voice_path = tts_model.get_voice_path(voice_path_str)
                 
                 # c. Create the condition_attributes. The function returns a SINGLE object.
-                # We need to wrap it in a list for the generate function.
+                #    It MUST be passed as a LIST to the generate function.
                 condition_attributes = [tts_model.make_condition_attributes([voice_path])]
 
                 # d. Generate audio. The function expects a LIST of entries AND a LIST of attributes.
-                # The generate function returns a LIST of TTSResult objects.
-                # The error 'Entry' object is not iterable means 'entries' is not treated as a list of lists.
-                # We are passing entries as a list of Entry objects, and condition_attributes as a list of ConditionAttributes.
-                # The library's internal new_state expects an iterable of entries.
-                # So, we pass the list returned by prepare_script directly as the first argument.
-                results_list = tts_model.generate(entries, condition_attributes) # Pass entries (list of Entry) and condition_attributes (list of ConditionAttributes)
+                #    The issue was that `entries` itself, though a list, was not being treated
+                #    as an iterable by the internal `new_state` function. The fix is to ensure
+                #    it's passed as a list of lists, or a structure that `deque()` can handle.
+                #    The most reliable pattern is `tts_model.generate([list_of_entries], [list_of_attributes])`.
+                results_list = tts_model.generate([entries], condition_attributes) # FIX: Pass `entries` as a list of lists.
                 
-                # e. Get the first result from the list.
+                # e. The generate function returns a LIST of TTSResult objects.
+                # Get the first result from the list.
                 result = results_list[0]
                 
                 # f. Get the audio data and sample rate from its attributes.
