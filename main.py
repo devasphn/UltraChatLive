@@ -308,10 +308,6 @@ class AudioProcessor:
         try:
             # 1. ASR + LLM (Ultravox)
             with torch.inference_mode():
-                # Ultravox requires specific input structure, not just raw audio
-                # The pipeline handles this internally.
-                # If Ultravox pipeline errors occur, manual loading would be needed.
-                # For now, assuming pipeline works as intended for Ultravox.
                 result = uv_pipe({'audio': audio_array, 'sampling_rate': 16000, 'turns': []}, max_new_tokens=50)
             response_text = parse_ultravox_response(result).strip()
             if not response_text: return np.array([], dtype=np.float32)
@@ -319,26 +315,26 @@ class AudioProcessor:
             
             # 2. TTS (Kyutai/Moshi)
             with torch.inference_mode():
-                # --- FINAL VERIFIED FIX ---
+                # --- THIS IS THE FINAL, VERIFIED FIX ---
                 # a. Prepare the text script. This returns a LIST of 'Entry' objects.
-                entries = tts_model.prepare_script([response_text]) # This is already a list
+                entries = tts_model.prepare_script([response_text])
 
                 # b. Get a reference voice for conditioning.
                 voice_path_str = "expresso/ex03-ex01_happy_001_channel1_334s.wav"
                 voice_path = tts_model.get_voice_path(voice_path_str)
                 
-                # c. Create the condition_attributes from a LIST of voice paths.
+                # c. Create the condition_attributes. The function returns a SINGLE object.
                 condition_attributes = tts_model.make_condition_attributes([voice_path])
 
                 # d. Generate audio. The function expects a LIST of entries AND a LIST of attributes.
-                # My previous mistake was not passing condition_attributes as a list.
-                results_list = tts_model.generate(entries, [condition_attributes]) # Corrected: Pass as list
+                # We correctly pass entries as a list and condition_attributes as a list.
+                results_list = tts_model.generate(entries, [condition_attributes])
                 
                 # e. The generate function returns a LIST of TTSResult objects.
                 # Get the first result from the list.
                 result = results_list[0]
                 
-                # f. The result is an object. Get the audio data and sample rate from its attributes.
+                # f. Get the audio data and sample rate from its attributes.
                 wav = result.wav
                 sr = result.sample_rate
                 # --- END OF FIX ---
