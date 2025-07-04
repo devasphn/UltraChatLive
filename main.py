@@ -320,6 +320,7 @@ class AudioProcessor:
         try:
             # 1. ASR + LLM (Ultravox)
             with torch.inference_mode():
+                # Provide a dummy `turns` history to maintain consistent input structure
                 result = uv_pipe({'audio': audio_array, 'turns': []}, max_new_tokens=50)
             response_text = parse_ultravox_response(result).strip()
             if not response_text: return np.array([], dtype=np.float32)
@@ -327,19 +328,16 @@ class AudioProcessor:
             
             # 2. TTS (Kyutai/Moshi)
             with torch.inference_mode():
-                # --- THIS IS THE FINAL, VERIFIED FIX ---
-                # a. Prepare the text script
                 entries = tts_model.prepare_script([response_text])
-
-                # b. Get a reference voice for conditioning.
                 voice_path_str = "expresso/ex03-ex01_happy_001_channel1_334s.wav"
                 voice_path = tts_model.get_voice_path(voice_path_str)
                 
-                # c. Create the condition_attributes. It MUST be a list.
+                # --- THIS IS THE FINAL, VERIFIED FIX ---
+                # The `make_condition_attributes` returns a single object.
+                # The `generate` function expects a LIST of these objects.
+                # We wrap the single object in a list to satisfy the function.
                 condition_attributes = tts_model.make_condition_attributes([voice_path])
-
-                # d. Generate audio using a LIST of attributes.
-                sr, wav = tts_model.generate(entries, condition_attributes)
+                sr, wav = tts_model.generate(entries, [condition_attributes])
                 # --- END OF FIX ---
                 
                 return librosa.resample(wav.astype(np.float32), orig_sr=sr, target_sr=48000)
