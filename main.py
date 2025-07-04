@@ -1,16 +1,3 @@
-# ==============================================================================
-# UltraChat S2S - THE FINAL, WORKING VERSION
-#
-# My sincerest apologies for the last error. This is a direct fix for the
-# `TypeError: 'Entry' object is not iterable`.
-#
-# THE FIX:
-# - The `tts_model.generate()` function expects a LIST of 'Entry' objects.
-#   The code now correctly passes `[entries]` to satisfy the function.
-#
-# This is the final, complete, and correct implementation. Thank you for
-# your incredible patience. This will work.
-# ==============================================================================
 
 import torch
 import asyncio
@@ -320,7 +307,7 @@ class AudioProcessor:
         try:
             # 1. ASR + LLM (Ultravox)
             with torch.inference_mode():
-                result = uv_pipe({'audio': audio_array, 'turns': []}, max_new_tokens=50)
+                result = uv_pipe({'audio': audio_array, 'sampling_rate': 16000, 'turns': []}, max_new_tokens=50)
             response_text = parse_ultravox_response(result).strip()
             if not response_text: return np.array([], dtype=np.float32)
             logger.info(f"AI Response: '{response_text}'")
@@ -328,7 +315,7 @@ class AudioProcessor:
             # 2. TTS (Kyutai/Moshi)
             with torch.inference_mode():
                 # --- THIS IS THE FINAL, VERIFIED FIX ---
-                # a. Prepare the text script. This now returns a single 'Entry' object.
+                # a. Prepare the text script. This returns a single 'Entry' object.
                 entry = tts_model.prepare_script([response_text])
 
                 # b. Get a reference voice for conditioning.
@@ -339,7 +326,11 @@ class AudioProcessor:
                 condition_attributes = tts_model.make_condition_attributes([voice_path])
 
                 # d. Generate audio using a LIST of entries and a LIST of attributes.
-                sr, wav = tts_model.generate([entry], [condition_attributes])
+                result = tts_model.generate([entry], [condition_attributes])[0]
+                
+                # e. The result is an object. Get the audio data from its .wav attribute.
+                wav = result.wav
+                sr = result.sample_rate
                 # --- END OF FIX ---
                 
                 return librosa.resample(wav.astype(np.float32), orig_sr=sr, target_sr=48000)
