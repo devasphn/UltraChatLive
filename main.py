@@ -1,16 +1,3 @@
-# ==============================================================================
-# UltraChat S2S - V14: THE DEFINITIVE FIX for `AttributeError`
-#
-# My sincerest apologies for the last error. This is a direct and verified
-# fix for the `AttributeError: 'str' object has no attribute 'get'`.
-#
-# THE FIX:
-# - The error was caused by my incorrect assumption about the data type
-#   returned by the Ultravox pipeline. It returns a string, not a dictionary.
-# - The code has been corrected to handle the output as a string directly.
-#
-# This is the final, complete, and verified version.
-# ==============================================================================
 
 import torch
 import asyncio
@@ -22,7 +9,6 @@ import warnings
 import collections
 import time
 import librosa
-import os
 from concurrent.futures import ThreadPoolExecutor
 
 from aiohttp import web, WSMsgType
@@ -30,10 +16,9 @@ from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack, R
 import av
 
 from transformers import pipeline
+# We now import the TTS model directly from its source
+from emoti_voice.emoti_voice.inference.tts import TTS
 import torch.hub
-
-# --- Google Cloud TTS Import ---
-from google.cloud import texttospeech
 
 # --- Basic Setup ---
 try:
@@ -48,29 +33,26 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(level
 logger = logging.getLogger(__name__)
 logging.getLogger('aioice.ice').setLevel(logging.WARNING)
 logging.getLogger('aiortc').setLevel(logging.WARNING)
-logging.getLogger('google').setLevel(logging.WARNING)
 
 # --- Global Variables & HTML ---
-s2s_pipe, vad_model, tts_client = None, None, None
+ultravox_pipe, tts_model, vad_model = None, None, None
 executor = ThreadPoolExecutor(max_workers=4)
 pcs = set()
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
-
 HTML_CLIENT = """
 <!DOCTYPE html>
 <html>
 <head>
-    <title>UltraChat Voice Assistant (Ultravox + Google TTS)</title>
+    <title>UltraChat Voice Assistant</title>
     <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #1a232e; color: #e1e8f0; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
-        .container { background: #2c3e50; padding: 40px; border-radius: 12px; box-shadow: 0 12px 24px rgba(0,0,0,0.25); text-align: center; max-width: 600px; width: 100%; border: 1px solid #4a5568; }
-        h1 { margin-bottom: 30px; font-weight: 300; letter-spacing: 1px; }
-        button { background: #38a169; color: white; border: none; padding: 15px 30px; font-size: 18px; border-radius: 8px; cursor: pointer; margin: 10px; transition: all 0.3s; }
-        button:hover { transform: translateY(-3px); box-shadow: 0 6px 12px rgba(0,0,0,0.2); background: #2f855a; }
-        button:disabled { background: #718096; cursor: not-allowed; transform: none; box-shadow: none; }
-        .stop-btn { background: #e53e3e; } .stop-btn:hover { background: #c53030; }
-        .status { margin: 20px 0; padding: 15px; border-radius: 8px; font-weight: 500; transition: background-color 0.5s, box-shadow 0.3s; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #2c3e50; color: #ecf0f1; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+        .container { background: #34495e; padding: 40px; border-radius: 10px; box-shadow: 0 10px 20px rgba(0,0,0,0.2); text-align: center; max-width: 600px; width: 100%; }
+        h1 { margin-bottom: 30px; font-weight: 300; }
+        button { background: #2ecc71; color: white; border: none; padding: 15px 30px; font-size: 18px; border-radius: 5px; cursor: pointer; margin: 10px; transition: all 0.3s; }
+        button:hover { transform: translateY(-2px); box-shadow: 0 4px 8px rgba(0,0,0,0.2); }
+        button:disabled { background: #95a5a6; cursor: not-allowed; transform: none; box-shadow: none; }
+        .stop-btn { background: #e74c3c; } .stop-btn:hover { background: #c0392b; }
+        .status { margin: 20px 0; padding: 15px; border-radius: 5px; font-weight: 500; transition: background-color 0.5s, box-shadow 0.3s; }
         .status.connected { background: #27ae60; }
         .status.disconnected { background: #c0392b; }
         .status.connecting { background: #f39c12; }
@@ -80,7 +62,7 @@ HTML_CLIENT = """
 </head>
 <body>
     <div class="container">
-        <h1>🎙️ UltraChat (Ultravox + Google TTS)</h1>
+        <h1>🎙️ UltraChat Voice Assistant</h1>
         <div class="controls">
             <button id="startBtn" onclick="start()">START</button>
             <button id="stopBtn" onclick="stop()" class="stop-btn" disabled>STOP</button>
@@ -94,8 +76,12 @@ HTML_CLIENT = """
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');
     const statusDiv = document.getElementById('status');
+    let isAISpeaking = false;
 
-    function updateStatus(message, className) { statusDiv.textContent = message; statusDiv.className = `status ${className}`; }
+    function updateStatus(message, className) {
+        statusDiv.textContent = message;
+        statusDiv.className = `status ${className}`;
+    }
 
     async function start() {
         if(ws || pc) { stop(); }
@@ -171,6 +157,18 @@ def candidate_from_sdp(candidate_string: str) -> dict:
         elif bits[i] == "rport": params['relatedPort'] = int(bits[i + 1])
     return params
 
+def parse_ultravox_response(result):
+    try:
+        if isinstance(result, str): return result
+        elif isinstance(result, list) and len(result) > 0:
+            item = result[0]
+            if isinstance(item, str): return item
+            elif isinstance(item, dict) and 'generated_text' in item: return item['generated_text']
+        return ""
+    except Exception as e:
+        logger.error(f"Error parsing Ultravox response: {e}")
+        return ""
+
 # --- Model Loading and VAD ---
 class SileroVAD:
     def __init__(self):
@@ -195,7 +193,7 @@ class SileroVAD:
             return True
 
 def initialize_models():
-    global s2s_pipe, tts_client, vad_model
+    global ultravox_pipe, tts_model, vad_model
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
     logger.info(f"🚀 Initializing models on device: {device} with dtype: {torch_dtype}")
@@ -204,16 +202,14 @@ def initialize_models():
     if not vad_model.model: return False
         
     try:
-        logger.info("📥 Loading Ultravox v0.4 pipeline (`fixie-ai/ultravox-v0_4`)...")
-        s2s_pipe = pipeline(model="fixie-ai/ultravox-v0_4", device_map="auto", torch_dtype=torch_dtype, trust_remote_code=True)
-        logger.info("✅ Ultravox v0.4 pipeline loaded successfully")
+        logger.info("📥 Loading Ultravox ASR+LLM model (`fixie-ai/ultravox-v0.4`)...")
+        ultravox_pipe = pipeline("automatic-speech-recognition", model="fixie-ai/ultravox-v0.4", device_map="auto", torch_dtype=torch_dtype, trust_remote_code=True)
+        logger.info("✅ Ultravox loaded successfully")
         
-        logger.info("🔑 Initializing Google Cloud TTS client with API Key...")
-        if not GOOGLE_API_KEY:
-            logger.error("❌ GOOGLE_API_KEY environment variable not set. This is required.")
-            return False
-        tts_client = texttospeech.TextToSpeechClient(client_options={"api_key": GOOGLE_API_KEY})
-        logger.info("✅ Google Cloud TTS client initialized successfully")
+        logger.info("📥 Loading Emoti-Voice TTS model (`Kyutai/emoti-voice`)...")
+        # Emoti-Voice requires a specific loading pattern
+        tts_model = TTS.from_pretrained("Kyutai/emoti-voice", device=device)
+        logger.info("✅ Emoti-Voice TTS loaded successfully")
         
         logger.info("🎉 All models loaded successfully!")
         return True
@@ -224,7 +220,8 @@ def initialize_models():
 # --- Audio Processing Classes ---
 class AudioBuffer:
     def __init__(self, max_duration=5.0, sample_rate=16000):
-        self.sample_rate, self.max_samples, self.buffer = sample_rate, int(max_duration * sample_rate), collections.deque(maxlen=int(max_duration * sample_rate))
+        self.sample_rate, self.max_samples = sample_rate, int(max_duration * sample_rate)
+        self.buffer = collections.deque(maxlen=self.max_samples)
         self.last_process_time, self.min_speech_samples, self.process_interval = time.time(), int(0.4 * sample_rate), 0.5
     
     def add_audio(self, audio_data):
@@ -238,7 +235,9 @@ class AudioBuffer:
         current_time = time.time()
         if len(self.buffer) > self.min_speech_samples and (current_time - self.last_process_time) > self.process_interval:
             self.last_process_time = current_time
-            return vad_model.detect_speech(self.get_audio_array(), self.sample_rate)
+            audio_array = self.get_audio_array()
+            if np.abs(audio_array).max() < 0.005: return False
+            return vad_model.detect_speech(audio_array, self.sample_rate)
         return False
 
     def reset(self): self.buffer.clear()
@@ -263,15 +262,14 @@ class ResponseAudioTrack(MediaStreamTrack):
         self._timestamp += frame_samples
         return audio_frame
 
-    async def queue_audio(self, audio_bytes):
-        if audio_bytes:
-            audio_array = np.frombuffer(audio_bytes, dtype=np.int16)
-            await self._queue.put(audio_array)
+    async def queue_audio(self, audio_float32):
+        if audio_float32.size > 0: await self._queue.put((audio_float32 * 32767).astype(np.float316))
 
 class AudioProcessor:
     def __init__(self, output_track: ResponseAudioTrack, executor: ThreadPoolExecutor):
         self.track, self.buffer, self.output_track, self.task, self.executor = None, AudioBuffer(), output_track, None, executor
         self.is_speaking = False
+        self.conversation_history = []
 
     def add_track(self, track): self.track = track
     async def start(self): self.task = asyncio.create_task(self._run())
@@ -296,44 +294,41 @@ class AudioProcessor:
         except Exception as e: logger.error(f"Audio processor error: {e}", exc_info=True)
         finally: logger.info("Audio processor stopped.")
             
-    def _blocking_ultravox_gtts(self, audio_array) -> (bytes, float):
+    def _blocking_asr_llm_tts(self, audio_array) -> np.ndarray:
         try:
-            result = s2s_pipe({'audio': audio_array, 'sampling_rate': 16000, 'turns': []}, max_new_tokens=60)
+            # 1. ASR + LLM (Ultravox)
+            result = ultravox_pipe({'audio': audio_array, 'turns': self.conversation_history, 'sampling_rate': 16000}, max_new_tokens=60)
+            response_text = parse_ultravox_response(result).strip()
+            if not response_text: return np.array([], dtype=np.float32)
+            logger.info(f"🤖 Ultravox Response: '{response_text}'")
             
-            # --- THIS IS THE FIX for the AttributeError ---
-            # The pipeline returns a string directly, not a dictionary.
-            response_text = result.strip()
-            # --- END OF FIX ---
+            # Update conversation history for next turn
+            # Note: Ultravox doesn't explicitly return the user's transcription,
+            # so we'll just append the assistant's response for context.
+            self.conversation_history.append({"role": "assistant", "content": response_text})
+            if len(self.conversation_history) > 6: # Keep history from getting too long
+                self.conversation_history = self.conversation_history[-6:]
 
-            if not response_text: return None, 0
-            logger.info(f"🤖 Ultravox Text: '{response_text}'")
-            
-            synthesis_input = texttospeech.SynthesisInput(text=response_text)
-            voice = texttospeech.VoiceSelectionParams(language_code="en-US", name="en-US-Studio-O")
-            audio_config = texttospeech.AudioConfig(audio_encoding=texttospeech.AudioEncoding.LINEAR16, sample_rate_hertz=24000)
-            
-            tts_response = tts_client.synthesize_speech(input=synthesis_input, voice=voice, audio_config=audio_config)
-            
-            audio_segment = np.frombuffer(tts_response.audio_content, dtype=np.int16).astype(np.float32) / 32768.0
-            resampled_wav = librosa.resample(audio_segment, orig_sr=24000, target_sr=48000)
-            
-            audio_bytes = (resampled_wav * 32767).astype(np.int16).tobytes()
-            playback_duration = len(resampled_wav) / 48000
-            
-            return audio_bytes, playback_duration
-
+            # 2. TTS (Emoti-Voice)
+            with torch.inference_mode():
+                # We can control the emotion with the `prompt` argument.
+                # e.g., prompt='<|happy|>' or '<|sad|>'
+                wav_16k = tts_model.tts(response_text, prompt='<|neutral|>', speaker='353_141618_000030_000002')
+                wav_16k = wav_16k.cpu().numpy()
+                # Resample from Emoti-Voice's 16kHz to WebRTC's 48kHz
+                return librosa.resample(wav_16k.astype(np.float32), orig_sr=16000, target_sr=48000)
         except Exception as e:
             logger.error(f"Error in background processing thread: {e}", exc_info=True)
-            return None, 0
+            return np.array([], dtype=np.float32)
 
     async def process_speech(self, audio_array):
         try:
             self.is_speaking = True
             loop = asyncio.get_running_loop()
-            audio_bytes, playback_duration = await loop.run_in_executor(self.executor, self._blocking_ultravox_gtts, audio_array)
-            
-            if audio_bytes:
-                await self.output_track.queue_audio(audio_bytes)
+            resampled_wav = await loop.run_in_executor(self.executor, self._blocking_asr_llm_tts, audio_array)
+            if resampled_wav.size > 0:
+                await self.output_track.queue_audio(resampled_wav)
+                playback_duration = resampled_wav.size / 48000
                 await asyncio.sleep(playback_duration)
         except Exception as e:
             logger.error(f"Speech processing error: {e}", exc_info=True)
@@ -376,8 +371,9 @@ async def websocket_handler(request):
                 elif data["type"] == "ice-candidate" and data.get("candidate"):
                     try:
                         candidate_data = data["candidate"]
-                        if candidate_data.get("candidate"):
-                            params = candidate_from_sdp(candidate_data["candidate"])
+                        candidate_string = candidate_data.get("candidate")
+                        if candidate_string:
+                            params = candidate_from_sdp(candidate_string)
                             await pc.addIceCandidate(RTCIceCandidate(sdpMid=candidate_data.get("sdpMid"), sdpMLineIndex=candidate_data.get("sdpMLineIndex"), **params))
                     except Exception as e: logger.error(f"Error adding ICE candidate: {e}", exc_info=True)
     except Exception as e:
@@ -417,7 +413,7 @@ async def main():
     await site.start()
     
     print("✅ Server started successfully on http://0.0.0.0:7860")
-    print("🚀 Your Ultravox v0.4 + Google TTS speech agent is live!")
+    print("🚀 Your speech-to-speech agent is live!")
     print("   Press Ctrl+C to stop the server.")
     
     await asyncio.Event().wait()
