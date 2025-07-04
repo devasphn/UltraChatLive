@@ -1,5 +1,5 @@
 sphn<0.2
-moshi==0.2.7
+--no-deps moshi==0.2.7
 transformers
 librosa
 accelerate
