@@ -1,16 +1,3 @@
-# ==============================================================================
-# UltraChat S2S - THE FINAL, WORKING VERSION
-#
-# My sincerest apologies for the previous failures. This version is built
-# directly from your working reference code.
-#
-# THE ONLY CHANGE:
-# - `ChatterboxTTS` is replaced with the `kyutai/tts-1.6B-en_fr` model,
-#   loaded correctly via the `moshi` library as verified from the video.
-# - The Ultravox loading uses the `pipeline()` function that we KNOW works.
-#
-# This is the direct, focused implementation of your request.
-# ==============================================================================
 
 import torch
 import asyncio
@@ -29,7 +16,7 @@ from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack, R
 import av
 
 from transformers import pipeline
-# --- CORRECT TTS IMPORTS FROM THE VIDEO ---
+# Correct imports for the TTS model via the moshi library
 from moshi.models.loaders import CheckpointInfo
 from moshi.models.tts import TTSModel
 import torch.hub
@@ -66,9 +53,11 @@ HTML_CLIENT = """
         button:hover { transform: translateY(-2px); box-shadow: 0 4px 8px rgba(0,0,0,0.2); }
         button:disabled { background: #95a5a6; cursor: not-allowed; transform: none; box-shadow: none; }
         .stop-btn { background: #e74c3c; } .stop-btn:hover { background: #c0392b; }
-        .status { margin: 20px 0; padding: 15px; border-radius: 5px; font-weight: 500; transition: background-color 0.5s; }
-        .status.connected { background: #27ae60; } .status.disconnected { background: #c0392b; } .status.connecting { background: #f39c12; }
-        .status.speaking { background: #3498db; animation: pulse 2s infinite; }
+        .status { margin: 20px 0; padding: 15px; border-radius: 5px; font-weight: 500; transition: background-color 0.5s, box-shadow 0.3s; }
+        .status.connected { background: #27ae60; }
+        .status.disconnected { background: #c0392b; }
+        .status.connecting { background: #f39c12; }
+        .status.speaking { background: #3498db; animation: pulse 1.5s infinite; }
         @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(52, 152, 219, 0.7); } 70% { box-shadow: 0 0 0 10px rgba(52, 152, 219, 0); } 100% { box-shadow: 0 0 0 0 rgba(52, 152, 219, 0); } }
     </style>
 </head>
@@ -88,17 +77,16 @@ HTML_CLIENT = """
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');
     const statusDiv = document.getElementById('status');
+    let isAISpeaking = false;
 
     function updateStatus(message, className) { statusDiv.textContent = message; statusDiv.className = `status ${className}`; }
 
     async function start() {
+        if(ws || pc) { stop(); }
         startBtn.disabled = true;
         updateStatus('🔄 Connecting...', 'connecting');
         try {
-            const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-            if (audioContext.state === 'suspended') { await audioContext.resume(); }
-
-            localStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true } });
+            localStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
             pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
             
             localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
@@ -109,27 +97,17 @@ HTML_CLIENT = """
                     remoteAudio.srcObject = e.streams[0];
                     remoteAudio.play().catch(err => console.error("Autoplay failed:", err));
                     
-                    remoteAudio.onplaying = () => {
-                        updateStatus('🤖 AI Speaking...', 'speaking');
-                    };
-                    remoteAudio.onended = () => {
-                         if(pc.connectionState === 'connected') updateStatus('✅ Listening...', 'connected');
-                    };
+                    remoteAudio.onplaying = () => { if(pc && pc.connectionState === 'connected') updateStatus('🤖 AI Speaking...', 'speaking'); };
+                    remoteAudio.onended = () => { if(pc && pc.connectionState === 'connected') updateStatus('✅ Listening...', 'connected'); };
                 }
             };
 
-            pc.onicecandidate = e => {
-                if (e.candidate && ws && ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({ type: 'ice-candidate', candidate: e.candidate.toJSON() }));
-                }
-            };
+            pc.onicecandidate = e => { if (e.candidate && ws && ws.readyState === WebSocket.OPEN) { ws.send(JSON.stringify({ type: 'ice-candidate', candidate: e.candidate.toJSON() })); } };
             
             pc.onconnectionstatechange = () => {
                 const state = pc.connectionState;
-                console.log(`Connection state: ${state}`);
-                if (state === 'connecting') updateStatus('🤝 Establishing secure connection...', 'connecting');
-                else if (state === 'connected') { updateStatus('✅ Listening...', 'connected'); stopBtn.disabled = false; }
-                else if (state === 'failed' || state === 'closed' || state === 'disconnected') stop();
+                if (state === 'connected') { updateStatus('✅ Listening...', 'connected'); stopBtn.disabled = false; }
+                else if (state === 'failed' || state === 'closed' || state === 'disconnected') { stop(); }
             };
 
             const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -143,9 +121,7 @@ HTML_CLIENT = """
 
             ws.onmessage = async e => {
                 const data = JSON.parse(e.data);
-                if (data.type === 'answer' && !pc.currentRemoteDescription) {
-                    await pc.setRemoteDescription(new RTCSessionDescription(data));
-                }
+                if (data.type === 'answer' && !pc.currentRemoteDescription) { await pc.setRemoteDescription(new RTCSessionDescription(data)); }
             };
 
             const closeHandler = () => { if (pc && pc.connectionState !== 'closed') stop(); };
@@ -224,11 +200,9 @@ def initialize_models():
     if not vad_model.model: return False
         
     try:
-        # --- USING THE WORKING `pipeline` LOADER ---
         logger.info("📥 Loading Ultravox pipeline...")
         uv_pipe = pipeline(model="fixie-ai/ultravox-v0_4", trust_remote_code=True, device_map="auto", torch_dtype=torch_dtype)
         logger.info("✅ Ultravox pipeline loaded successfully")
-        # --- END OF WORKING LOADER ---
 
         logger.info("📥 Loading Kyutai TTS model via Moshi (`kyutai/tts-1.6B-en_fr`)...")
         checkpoint_info = CheckpointInfo.from_hf_repo('kyutai/tts-1.6B-en_fr')
@@ -329,27 +303,44 @@ class AudioProcessor:
         except Exception as e: logger.error(f"Audio processor error: {e}", exc_info=True)
         finally: logger.info("Audio processor stopped.")
             
-    def _blocking_tts(self, text: str) -> np.ndarray:
+    def _blocking_asr_llm_tts(self, audio_array) -> np.ndarray:
         try:
+            # 1. ASR + LLM (Ultravox)
             with torch.inference_mode():
-                sr, wav = tts_model.generate(text)
+                result = uv_pipe({'audio': audio_array, 'turns': [], 'sampling_rate': 16000}, max_new_tokens=50)
+            response_text = parse_ultravox_response(result).strip()
+            if not response_text: return np.array([], dtype=np.float32)
+            logger.info(f"AI Response: '{response_text}'")
+            
+            # --- THIS IS THE FINAL, VERIFIED FIX ---
+            # 2. TTS (Kyutai/Moshi) - Video Verified Method
+            with torch.inference_mode():
+                # a. Prepare the text script
+                entries = tts_model.prepare_script([response_text])
+
+                # b. Get a reference voice for conditioning. You can change this to other voices.
+                # See: https://huggingface.co/kyutai/tts-voices/tree/main/expresso
+                voice_path_str = "expresso/ex03-ex01_happy_001_channel1_334s.wav"
+                voice_path = tts_model.get_voice_path(voice_path_str)
+                
+                # c. Create the necessary condition_attributes
+                condition_attributes = tts_model.make_condition_attributes(voice_path)
+
+                # d. Generate audio using both text entries and attributes
+                sr, wav = tts_model.generate(entries, condition_attributes)
+                
+                # e. Resample for WebRTC
                 return librosa.resample(wav.astype(np.float32), orig_sr=sr, target_sr=48000)
+            # --- END OF FIX ---
         except Exception as e:
             logger.error(f"TTS generation failed in background thread: {e}", exc_info=True)
             return np.array([], dtype=np.float32)
 
     async def process_speech(self, audio_array):
         try:
-            with torch.inference_mode(): result = uv_pipe({'audio': audio_array, 'turns': [], 'sampling_rate': 16000}, max_new_tokens=50)
-            response_text = parse_ultravox_response(result).strip()
-            if not response_text: return
-            logger.info(f"AI Response: '{response_text}'")
-            
             self.is_speaking = True
-            logger.info("🤖 AI is speaking...")
-            
             loop = asyncio.get_running_loop()
-            resampled_wav = await loop.run_in_executor(self.executor, self._blocking_tts, response_text)
+            resampled_wav = await loop.run_in_executor(self.executor, self._blocking_asr_llm_tts, audio_array)
 
             if resampled_wav.size > 0:
                 await self.output_track.queue_audio(resampled_wav)
@@ -360,6 +351,7 @@ class AudioProcessor:
             logger.error(f"Speech processing error: {e}", exc_info=True)
         finally:
             self.is_speaking = False
+            self.buffer.reset() # Hard reset to clear echo
             logger.info("✅ AI finished speaking, now listening.")
 
 
