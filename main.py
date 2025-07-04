@@ -324,11 +324,11 @@ class AudioProcessor:
                 voice_path = tts_model.get_voice_path(voice_path_str)
                 
                 # c. Create the condition_attributes. The function returns a SINGLE object.
-                condition_attributes = tts_model.make_condition_attributes([voice_path])
+                # We need to wrap it in a list for the generate function.
+                condition_attributes = [tts_model.make_condition_attributes([voice_path])]
 
                 # d. Generate audio. The function expects a LIST of entries AND a LIST of attributes.
-                # We correctly pass entries as a list and condition_attributes as a list.
-                results_list = tts_model.generate(entries, [condition_attributes])
+                results_list = tts_model.generate(entries, condition_attributes)
                 
                 # e. The generate function returns a LIST of TTSResult objects.
                 # Get the first result from the list.
