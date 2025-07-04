@@ -1,17 +1,3 @@
-# ==============================================================================
-# UltraChat S2S - THE FINAL, WORKING, VERIFIED VERSION
-#
-# My sincerest apologies for the last error. This is a direct fix for the
-# `TypeError: 'ConditionAttributes' object is not iterable`.
-#
-# THE FIX:
-# - The `tts_model.generate()` function expects a LIST of attributes.
-# - The code now correctly passes `[condition_attributes]` to the function.
-# - The function also returns a LIST of results, so we take the first `[0]`.
-#
-# This is the final, complete, and correct implementation. This will work.
-# Thank you for your incredible patience. We have reached the end.
-# ==============================================================================
 
 import torch
 import asyncio
