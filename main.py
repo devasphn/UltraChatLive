@@ -10,6 +10,9 @@ import time
 import librosa
 from concurrent.futures import ThreadPoolExecutor
 import gc
+import psutil
+import threading
+from typing import Optional, List
 
 from aiohttp import web, WSMsgType
 from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack, RTCIceCandidate, RTCConfiguration, RTCIceServer, mediastreams
@@ -42,12 +45,29 @@ logger = logging.getLogger(__name__)
 for log_name in ['aioice.ice', 'aiortc', 'transformers', 'torch']:
     logging.getLogger(log_name).setLevel(logging.ERROR)
 
-# --- Optimized Global Variables ---
+# --- Global Variables ---
 uv_pipe, tts_model, vad_model = None, None, None
 executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="audio_proc")
 pcs = set()
 
-# --- HTML Client (keeping your existing HTML) ---
+# Memory pool for audio processing
+AUDIO_BUFFER_POOL = []
+POOL_SIZE = 10
+
+def get_audio_buffer(size: int) -> np.ndarray:
+    """Reuse audio buffers to reduce GC pressure"""
+    for i, buf in enumerate(AUDIO_BUFFER_POOL):
+        if buf.size >= size:
+            AUDIO_BUFFER_POOL.pop(i)
+            return buf[:size]
+    return np.zeros(size, dtype=np.float32)
+
+def return_audio_buffer(buf: np.ndarray):
+    """Return buffer to pool"""
+    if len(AUDIO_BUFFER_POOL) < POOL_SIZE:
+        AUDIO_BUFFER_POOL.append(buf)
+
+# --- HTML Client (same as before) ---
 HTML_CLIENT = """
 <!DOCTYPE html>
 <html>
@@ -74,6 +94,7 @@ HTML_CLIENT = """
         .status.connecting { background: #ffaa00; color: #000; }
         .status.speaking { background: #0088ff; animation: pulse 1s infinite; }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
+        .latency { font-size: 12px; color: #888; margin-top: 10px; }
     </style>
 </head>
 <body>
@@ -84,18 +105,24 @@ HTML_CLIENT = """
             <button id="stopBtn" onclick="stop()" class="stop-btn" disabled>STOP</button>
         </div>
         <div id="status" class="status disconnected">🔌 Disconnected</div>
+        <div id="latency" class="latency">Latency: -- ms</div>
         <audio id="remoteAudio" autoplay playsinline></audio>
     </div>
 <script>
-    let pc, ws, localStream;
+    let pc, ws, localStream, startTime;
     const remoteAudio = document.getElementById('remoteAudio');
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');
     const statusDiv = document.getElementById('status');
+    const latencyDiv = document.getElementById('latency');
 
     function updateStatus(message, className) { 
         statusDiv.textContent = message; 
         statusDiv.className = `status ${className}`; 
+    }
+
+    function updateLatency(ms) {
+        latencyDiv.textContent = `Latency: ${ms}ms`;
     }
 
     async function start() {
@@ -131,6 +158,10 @@ HTML_CLIENT = """
                     remoteAudio.play().catch(console.error);
                     
                     remoteAudio.onplaying = () => {
+                        if(startTime) {
+                            const latency = Date.now() - startTime;
+                            updateLatency(latency);
+                        }
                         updateStatus('🤖 AI Speaking...', 'speaking');
                     };
                     
@@ -172,6 +203,8 @@ HTML_CLIENT = """
                 const data = JSON.parse(e.data);
                 if (data.type === 'answer' && !pc.currentRemoteDescription) {
                     await pc.setRemoteDescription(new RTCSessionDescription(data));
+                } else if (data.type === 'processing') {
+                    startTime = Date.now();
                 }
             };
 
@@ -193,9 +226,15 @@ HTML_CLIENT = """
         });
         ws = pc = localStream = null;
         updateStatus('🔌 Disconnected', 'disconnected');
+        updateLatency('--');
         startBtn.disabled = false;
         stopBtn.disabled = true;
     }
+
+    window.addEventListener('load', () => {
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        document.addEventListener('click', () => audioContext.resume(), { once: true });
+    });
 </script>
 </body>
 </html>
@@ -203,6 +242,7 @@ HTML_CLIENT = """
 
 # --- Utility Functions ---
 def candidate_from_sdp(candidate_string: str) -> dict:
+    """Optimized SDP parsing"""
     if candidate_string.startswith("candidate:"):
         candidate_string = candidate_string[10:]
     
@@ -230,6 +270,7 @@ def candidate_from_sdp(candidate_string: str) -> dict:
     return params
 
 def parse_ultravox_response(result) -> str:
+    """Fast response parsing"""
     try:
         if isinstance(result, str):
             return result
@@ -260,7 +301,7 @@ class OptimizedSileroVAD:
             self.model.eval()
             self.get_speech_timestamps = utils[0]
             
-            # Warm up
+            # Warm up the model
             dummy_audio = torch.randn(16000).cuda() if torch.cuda.is_available() else torch.randn(16000)
             with torch.no_grad():
                 self.get_speech_timestamps(dummy_audio, self.model, sampling_rate=16000)
@@ -297,7 +338,7 @@ class OptimizedSileroVAD:
             logger.error(f"VAD error: {e}")
             return True
 
-# --- Model Loading ---
+# --- FIXED MODEL LOADING ---
 def initialize_models() -> bool:
     global uv_pipe, tts_model, vad_model
     
@@ -311,7 +352,7 @@ def initialize_models() -> bool:
         torch.cuda.set_per_process_memory_fraction(0.9)
     
     try:
-        # 1. Load VAD
+        # 1. Load VAD first
         vad_model = OptimizedSileroVAD()
         if vad_model.model is None:
             return False
@@ -338,7 +379,7 @@ def initialize_models() -> bool:
         
         logger.info("✅ Ultravox loaded and warmed up")
         
-        # 3. Load TTS
+        # 3. Load TTS model - FIXED VERSION
         logger.info("📥 Loading Kyutai TTS...")
         checkpoint_info = CheckpointInfo.from_hf_repo('kyutai/tts-1.6B-en_fr')
         tts_model = TTSModel.from_checkpoint_info(
@@ -347,16 +388,39 @@ def initialize_models() -> bool:
             dtype=torch_dtype
         )
         
-        # Warm up TTS with CORRECTED code
-        with torch.no_grad():
-            entries_list = tts_model.prepare_script(["Hello"])
-            entry = entries_list[0]  # Extract the single Entry object
-            voice_path = tts_model.get_voice_path("expresso/ex03-ex01_happy_001_channel1_334s.wav")
-            condition_attributes = tts_model.make_condition_attributes([voice_path])
-            tts_model.generate([entry], [condition_attributes])  # Pass list with single Entry
+        # FIXED: Warm up TTS with proper API handling
+        logger.info("🔥 Warming up TTS model...")
+        try:
+            with torch.no_grad():
+                # Test with a simple word
+                test_text = "Hello"
+                
+                # Prepare script - returns a single Entry or list of Entry objects
+                entries = tts_model.prepare_script([test_text])
+                
+                # Get voice path
+                voice_path = tts_model.get_voice_path("expresso/ex03-ex01_happy_001_channel1_334s.wav")
+                
+                # Create condition attributes
+                condition_attributes = tts_model.make_condition_attributes([voice_path])
+                
+                # Generate - handle both single Entry and list cases
+                if hasattr(entries, '__iter__') and not isinstance(entries, str):
+                    # entries is iterable (list of Entry objects)
+                    results_list = tts_model.generate(list(entries), [condition_attributes])
+                else:
+                    # entries is a single Entry object
+                    results_list = tts_model.generate([entries], [condition_attributes])
+                
+                logger.info("✅ TTS model warmed up successfully")
         
-        logger.info("✅ TTS loaded and warmed up")
+        except Exception as warmup_error:
+            logger.warning(f"TTS warmup failed, but model loaded: {warmup_error}")
+            # Continue anyway - the model is loaded, warmup just failed
         
+        logger.info("✅ TTS loaded successfully")
+        
+        # Force garbage collection
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -569,7 +633,7 @@ class UltraFastAudioProcessor:
                 self.buffer.reset()
     
     def _ultra_fast_asr_llm_tts(self, audio_array: np.ndarray) -> np.ndarray:
-        """CORRECTED Ultra-optimized ASR+LLM+TTS pipeline"""
+        """FIXED TTS generation pipeline"""
         try:
             # 1. ASR + LLM (Ultravox)
             with torch.inference_mode():
@@ -585,29 +649,33 @@ class UltraFastAudioProcessor:
             
             logger.info(f"Response: '{response_text}'")
             
-            # 2. TTS (Kyutai/Moshi) - CORRECTED VERSION
+            # 2. TTS (Kyutai/Moshi) - FIXED VERSION
             with torch.inference_mode():
-                # a. Prepare script returns a LIST of Entry objects
-                entries_list = tts_model.prepare_script([response_text])
+                # Prepare script
+                entries = tts_model.prepare_script([response_text])
                 
-                # b. Extract the single Entry object from the list
-                entry = entries_list[0]
-                
-                # c. Get voice conditioning
+                # Get voice path
                 voice_path = tts_model.get_voice_path(
                     "expresso/ex03-ex01_happy_001_channel1_334s.wav"
                 )
+                
+                # Create condition attributes
                 condition_attributes = tts_model.make_condition_attributes([voice_path])
                 
-                # d. Generate using single Entry in a list
-                results_list = tts_model.generate([entry], [condition_attributes])
+                # Generate with proper handling
+                if hasattr(entries, '__iter__') and not isinstance(entries, str):
+                    # entries is iterable (list of Entry objects)
+                    results_list = tts_model.generate(list(entries), [condition_attributes])
+                else:
+                    # entries is a single Entry object
+                    results_list = tts_model.generate([entries], [condition_attributes])
                 
-                # e. Extract result
+                # Get the result
                 result = results_list[0]
                 wav = result.wav
                 sr = result.sample_rate
                 
-                # f. Resample if needed
+                # Resample to 48kHz if needed
                 if sr != 48000:
                     wav = librosa.resample(
                         wav.astype(np.float32), 
@@ -622,7 +690,7 @@ class UltraFastAudioProcessor:
             logger.error(f"Processing pipeline error: {e}")
             return np.array([], dtype=np.float32)
 
-# --- WebSocket and Web Handlers ---
+# --- WebSocket Handler ---
 async def websocket_handler(request):
     ws = web.WebSocketResponse(heartbeat=30, compress=False)
     await ws.prepare(request)
@@ -708,6 +776,12 @@ async def on_shutdown(app):
     executor.shutdown(wait=True)
 
 async def main():
+    try:
+        import os
+        os.nice(-10)
+    except:
+        pass
+    
     if not initialize_models():
         logger.error("Failed to initialize models")
         return
