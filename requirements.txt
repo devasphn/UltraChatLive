@@ -1,4 +1,4 @@
-sphn<0.2
+speechbrain<0.2
 transformers
 librosa
 accelerate
