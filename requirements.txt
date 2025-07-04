@@ -1,15 +1,2 @@
-torch==2.6.0
-torchvision==0.21.0
-torchaudio==2.6.0
-transformers>=4.46.0
-librosa>=0.11.0
-chatterbox-tts>=0.1.2
-numpy>=1.26.0
-scipy>=1.15.0
-huggingface-hub>=0.33.0
-peft
-accelerate
-
-# Real-time streaming and VAD
-fastrtc[vad,tts]
-soundfile
+sphn<0.2
+moshi==0.2.7
