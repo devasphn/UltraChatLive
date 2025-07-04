@@ -1,18 +1,3 @@
-# ==============================================================================
-# UltraChat S2S - THE DEFINITIVE, VIDEO-VERIFIED & DEBUGGED VERSION
-#
-# My sincerest apologies for the repeated failures. This version is the result
-# of a complete re-analysis and implements the correct, robust solution.
-#
-# THE FIX:
-# - The failing `transformers.pipeline()` call for Ultravox is REMOVED.
-# - Ultravox's processor and model are now loaded EXPLICITLY and MANUALLY.
-#   This bypasses the library bug and is the professional way to load
-#   custom models, guaranteeing that it will not crash on startup.
-#
-# This file contains all previous working logic combined with this final,
-# critical fix.
-# ==============================================================================
 
 import torch
 import asyncio
@@ -30,8 +15,10 @@ from aiohttp import web, WSMsgType
 from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack, RTCIceCandidate, RTCConfiguration, RTCIceServer, mediastreams
 import av
 
-# Correct imports for explicit loading
-from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq
+# --- CORRECT, EXPLICIT IMPORTS ---
+from transformers import AutoProcessor
+# We must import the specific model class for Ultravox
+from transformers_modules.fixie_ai.ultravox-v0_4.335521c44228935b20fd87e43b4453ae93f30658.ultravox_modeling import UltravoxForSpeechSeq2Seq
 # Correct imports for the TTS model via the moshi library
 from moshi.models.loaders import CheckpointInfo
 from moshi.models.tts import TTSModel
@@ -172,8 +159,6 @@ def candidate_from_sdp(candidate_string: str) -> dict:
     return params
 
 def parse_ultravox_response(text):
-    # Ultravox responses are now decoded manually, so this just cleans the text
-    # It removes the special tokens Ultravox might leave in.
     return text.replace("<|endoftext|>", "").strip()
 
 # --- Model Loading and VAD ---
@@ -212,7 +197,8 @@ def initialize_models():
         # --- EXPLICIT, ROBUST MODEL LOADING ---
         logger.info("📥 Loading Ultravox components (`fixie-ai/ultravox-v0_4`)...")
         ultravox_processor = AutoProcessor.from_pretrained("fixie-ai/ultravox-v0_4", trust_remote_code=True)
-        ultravox_model = AutoModelForSpeechSeq2Seq.from_pretrained("fixie-ai/ultravox-v0_4", torch_dtype=torch_dtype, device_map="auto", trust_remote_code=True)
+        # We now use the specific class, not the AutoClass, to avoid the error.
+        ultravox_model = UltravoxForSpeechSeq2Seq.from_pretrained("fixie-ai/ultravox-v0_4", torch_dtype=torch_dtype, device_map="auto", trust_remote_code=True)
         logger.info("✅ Ultravox components loaded successfully")
         
         logger.info("📥 Loading Kyutai TTS model (`kyutai/tts-1.6B-en_fr`)...")
@@ -305,12 +291,8 @@ class AudioProcessor:
             
     def _blocking_asr_llm_tts(self, audio_array) -> np.ndarray:
         try:
-            # --- EXPLICIT, MANUAL MODEL INFERENCE ---
-            # 1. ASR + LLM (Ultravox)
             inputs = ultravox_processor(audio=audio_array, sampling_rate=16000, return_tensors="pt")
             for key in inputs: inputs[key] = inputs[key].to("cuda", dtype=torch.float16)
-            
-            # Manually add conversation history to the inputs
             inputs['turns'] = self.conversation_history
             
             predicted_ids = ultravox_model.generate(**inputs, max_new_tokens=60)
@@ -321,7 +303,6 @@ class AudioProcessor:
             self.conversation_history.append({"role": "assistant", "content": response_text})
             if len(self.conversation_history) > 6: self.conversation_history = self.conversation_history[-6:]
 
-            # 2. TTS (Kyutai/Moshi)
             sr, wav = tts_model.generate(response_text)
             return librosa.resample(wav.astype(np.float32), orig_sr=sr, target_sr=48000)
 
