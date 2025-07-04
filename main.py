@@ -1,22 +1,3 @@
-# ==============================================================================
-# UltraChat S2S - THE ABSOLUTE FINAL, WORKING, VERIFIED VERSION
-#
-# My sincerest apologies for the repeated errors. This is the FINAL FIX.
-#
-# THE FIX:
-# - The way `entries` is prepared and passed to `tts_model.generate` is corrected.
-# - The `moshi` library's `generate` function expects `entries` to be handled
-#   in a specific way. The `prepare_script` returns a list of Entry objects.
-# - The `generate` function internally calls `new_state(entries)`. If `entries`
-#   is not processed correctly as an iterable of *its own kind*, it fails.
-#
-# - The most robust way to call `generate` is:
-#   `tts_model.generate([prepare_script_result], [condition_attributes])`
-#
-# This is the final, complete, and correct implementation. This WILL work.
-# Thank you for your incredible patience. We have reached the end.
-# ==============================================================================
-
 import torch
 import asyncio
 import json
@@ -28,105 +9,186 @@ import collections
 import time
 import librosa
 from concurrent.futures import ThreadPoolExecutor
+import gc
+import psutil
+import threading
+from typing import Optional, List
 
 from aiohttp import web, WSMsgType
 from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack, RTCIceCandidate, RTCConfiguration, RTCIceServer, mediastreams
 import av
 
 from transformers import pipeline
-# Correct imports for the TTS model via the moshi library
 from moshi.models.loaders import CheckpointInfo
 from moshi.models.tts import TTSModel
 import torch.hub
 
-# --- Basic Setup ---
+# --- Ultra-Low Latency Setup ---
 try:
     import uvloop
     uvloop.install()
-    print("🚀 Using uvloop for asyncio event loop.")
+    print("🚀 Using uvloop for maximum performance")
 except ImportError:
-    print("⚠️ uvloop not found, using default asyncio event loop.")
+    print("⚠️ uvloop not found, performance may be reduced")
 
+# GPU Optimizations
+torch.backends.cudnn.benchmark = True
+torch.backends.cudnn.deterministic = False
+torch.set_float32_matmul_precision('medium')  # Use Tensor Cores
+
+# Disable unnecessary warnings
 warnings.filterwarnings("ignore")
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logging.basicConfig(level=logging.WARNING)  # Reduced logging for speed
 logger = logging.getLogger(__name__)
-logging.getLogger('aioice.ice').setLevel(logging.WARNING)
-logging.getLogger('aiortc').setLevel(logging.WARNING)
 
-# --- Global Variables & HTML ---
+# Silence verbose loggers
+for log_name in ['aioice.ice', 'aiortc', 'transformers', 'torch']:
+    logging.getLogger(log_name).setLevel(logging.ERROR)
+
+# --- Optimized Global Variables ---
 uv_pipe, tts_model, vad_model = None, None, None
-executor = ThreadPoolExecutor(max_workers=4)
+executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="audio_proc")
 pcs = set()
+
+# Memory pool for audio processing
+AUDIO_BUFFER_POOL = []
+POOL_SIZE = 10
+
+def get_audio_buffer(size: int) -> np.ndarray:
+    """Reuse audio buffers to reduce GC pressure"""
+    for i, buf in enumerate(AUDIO_BUFFER_POOL):
+        if buf.size >= size:
+            AUDIO_BUFFER_POOL.pop(i)
+            return buf[:size]
+    return np.zeros(size, dtype=np.float32)
+
+def return_audio_buffer(buf: np.ndarray):
+    """Return buffer to pool"""
+    if len(AUDIO_BUFFER_POOL) < POOL_SIZE:
+        AUDIO_BUFFER_POOL.append(buf)
+
+# --- Optimized HTML Client ---
 HTML_CLIENT = """
 <!DOCTYPE html>
 <html>
 <head>
     <title>UltraChat Voice Assistant</title>
-    <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #2c3e50; color: #ecf0f1; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
-        .container { background: #34495e; padding: 40px; border-radius: 10px; box-shadow: 0 10px 20px rgba(0,0,0,0.2); text-align: center; max-width: 600px; width: 100%; }
-        h1 { margin-bottom: 30px; font-weight: 300; }
-        button { background: #2ecc71; color: white; border: none; padding: 15px 30px; font-size: 18px; border-radius: 5px; cursor: pointer; margin: 10px; transition: all 0.3s; }
-        button:hover { transform: translateY(-2px); box-shadow: 0 4px 8px rgba(0,0,0,0.2); }
-        button:disabled { background: #95a5a6; cursor: not-allowed; transform: none; box-shadow: none; }
-        .stop-btn { background: #e74c3c; } .stop-btn:hover { background: #c0392b; }
-        .status { margin: 20px 0; padding: 15px; border-radius: 5px; font-weight: 500; transition: background-color 0.5s, box-shadow 0.3s; }
-        .status.connected { background: #27ae60; }
-        .status.disconnected { background: #c0392b; }
-        .status.connecting { background: #f39c12; }
-        .status.speaking { background: #3498db; animation: pulse 1.5s infinite; }
-        @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(52, 152, 219, 0.7); } 70% { box-shadow: 0 0 0 10px rgba(52, 152, 219, 0); } 100% { box-shadow: 0 0 0 0 rgba(52, 152, 219, 0); } }
+        body { font-family: system-ui, -apple-system, sans-serif; margin: 0; padding: 20px; 
+               background: #1a1a1a; color: #fff; display: flex; align-items: center; 
+               justify-content: center; min-height: 100vh; }
+        .container { background: #2d2d2d; padding: 30px; border-radius: 8px; 
+                    text-align: center; max-width: 500px; width: 100%; }
+        h1 { margin-bottom: 20px; font-weight: 400; color: #00ff88; }
+        button { background: #00ff88; color: #000; border: none; padding: 12px 24px; 
+                font-size: 16px; border-radius: 4px; cursor: pointer; margin: 8px; 
+                transition: all 0.2s; font-weight: 600; }
+        button:hover { transform: scale(1.05); }
+        button:disabled { background: #666; cursor: not-allowed; transform: none; }
+        .stop-btn { background: #ff4444; color: #fff; }
+        .status { margin: 15px 0; padding: 10px; border-radius: 4px; font-weight: 500; }
+        .status.connected { background: #00ff88; color: #000; }
+        .status.disconnected { background: #ff4444; }
+        .status.connecting { background: #ffaa00; color: #000; }
+        .status.speaking { background: #0088ff; animation: pulse 1s infinite; }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
+        .latency { font-size: 12px; color: #888; margin-top: 10px; }
     </style>
 </head>
 <body>
     <div class="container">
-        <h1>🎙️ UltraChat Voice Assistant</h1>
+        <h1>⚡ UltraChat Voice Assistant</h1>
         <div class="controls">
             <button id="startBtn" onclick="start()">START</button>
             <button id="stopBtn" onclick="stop()" class="stop-btn" disabled>STOP</button>
         </div>
         <div id="status" class="status disconnected">🔌 Disconnected</div>
+        <div id="latency" class="latency">Latency: -- ms</div>
         <audio id="remoteAudio" autoplay playsinline></audio>
     </div>
 <script>
-    let pc, ws, localStream;
+    let pc, ws, localStream, startTime;
     const remoteAudio = document.getElementById('remoteAudio');
     const startBtn = document.getElementById('startBtn');
     const stopBtn = document.getElementById('stopBtn');
     const statusDiv = document.getElementById('status');
-    let isAISpeaking = false;
+    const latencyDiv = document.getElementById('latency');
 
-    function updateStatus(message, className) { statusDiv.textContent = message; statusDiv.className = `status ${className}`; }
+    function updateStatus(message, className) { 
+        statusDiv.textContent = message; 
+        statusDiv.className = `status ${className}`; 
+    }
+
+    function updateLatency(ms) {
+        latencyDiv.textContent = `Latency: ${ms}ms`;
+    }
 
     async function start() {
-        if(ws || pc) { stop(); }
+        if(ws || pc) stop();
         startBtn.disabled = true;
         updateStatus('🔄 Connecting...', 'connecting');
+        
         try {
-            localStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
-            pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+            // Optimized audio constraints for low latency
+            localStream = await navigator.mediaDevices.getUserMedia({ 
+                audio: { 
+                    echoCancellation: true, 
+                    noiseSuppression: true, 
+                    autoGainControl: false,  // Disabled for lower latency
+                    latency: 0.01,  // Request 10ms latency
+                    sampleRate: 48000,
+                    channelCount: 1
+                } 
+            });
             
-            localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
+            pc = new RTCPeerConnection({ 
+                iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
+                bundlePolicy: 'max-bundle',
+                rtcpMuxPolicy: 'require'
+            });
+            
+            localStream.getTracks().forEach(track => {
+                pc.addTrack(track, localStream);
+            });
 
             pc.ontrack = e => {
-                console.log('Remote track received!');
                 if (remoteAudio.srcObject !== e.streams[0]) {
                     remoteAudio.srcObject = e.streams[0];
-                    remoteAudio.play().catch(err => console.error("Autoplay failed:", err));
+                    remoteAudio.play().catch(console.error);
                     
-                    remoteAudio.onplaying = () => { if(pc && pc.connectionState === 'connected') updateStatus('🤖 AI Speaking...', 'speaking'); };
-                    remoteAudio.onended = () => { if(pc && pc.connectionState === 'connected') updateStatus('✅ Listening...', 'connected'); };
+                    remoteAudio.onplaying = () => {
+                        if(startTime) {
+                            const latency = Date.now() - startTime;
+                            updateLatency(latency);
+                        }
+                        updateStatus('🤖 AI Speaking...', 'speaking');
+                    };
+                    
+                    remoteAudio.onended = () => {
+                        updateStatus('✅ Listening...', 'connected');
+                    };
                 }
             };
 
-            pc.onicecandidate = e => { if (e.candidate && ws && ws.readyState === WebSocket.OPEN) { ws.send(JSON.stringify({ type: 'ice-candidate', candidate: e.candidate.toJSON() })); } };
+            pc.onicecandidate = e => {
+                if (e.candidate && ws?.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ 
+                        type: 'ice-candidate', 
+                        candidate: e.candidate.toJSON() 
+                    }));
+                }
+            };
             
             pc.onconnectionstatechange = () => {
                 const state = pc.connectionState;
-                if (state === 'connecting') updateStatus('🤝 Establishing secure connection...', 'connecting');
-                else if (state === 'connected') { updateStatus('✅ Listening...', 'connected'); stopBtn.disabled = false; }
-                else if (state === 'failed' || state === 'closed' || state === 'disconnected') stop();
+                if (state === 'connected') {
+                    updateStatus('✅ Listening...', 'connected');
+                    stopBtn.disabled = false;
+                } else if (['failed', 'closed', 'disconnected'].includes(state)) {
+                    stop();
+                }
             };
 
             const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -140,320 +202,586 @@ HTML_CLIENT = """
 
             ws.onmessage = async e => {
                 const data = JSON.parse(e.data);
-                if (data.type === 'answer' && !pc.currentRemoteDescription) { await pc.setRemoteDescription(new RTCSessionDescription(data)); }
+                if (data.type === 'answer' && !pc.currentRemoteDescription) {
+                    await pc.setRemoteDescription(new RTCSessionDescription(data));
+                } else if (data.type === 'processing') {
+                    startTime = Date.now();
+                }
             };
 
-            const closeHandler = () => { if (pc && pc.connectionState !== 'closed') stop(); };
-            ws.onclose = closeHandler;
-            ws.onerror = closeHandler;
+            ws.onclose = ws.onerror = () => stop();
 
-        } catch (err) { console.error(err); updateStatus(`❌ Error: ${err.message}`, 'disconnected'); stop(); }
+        } catch (err) {
+            console.error(err);
+            updateStatus(`❌ Error: ${err.message}`, 'disconnected');
+            stop();
+        }
     }
 
     function stop() {
-        if (ws) { ws.onclose = null; ws.onerror = null; ws.close(); ws = null; }
-        if (pc) { pc.onconnectionstatechange = null; pc.onicecandidate = null; pc.ontrack = null; pc.close(); pc = null; }
-        if (localStream) { localStream.getTracks().forEach(track => track.stop()); localStream = null; }
+        [ws, pc, localStream].forEach(obj => {
+            if (obj) {
+                if (obj.close) obj.close();
+                if (obj.getTracks) obj.getTracks().forEach(track => track.stop());
+            }
+        });
+        ws = pc = localStream = null;
         updateStatus('🔌 Disconnected', 'disconnected');
+        updateLatency('--');
         startBtn.disabled = false;
         stopBtn.disabled = true;
     }
+
+    // Preload audio context for faster startup
+    window.addEventListener('load', () => {
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        document.addEventListener('click', () => audioContext.resume(), { once: true });
+    });
 </script>
 </body>
 </html>
 """
 
-# --- Utility Functions ---
+# --- Optimized Utility Functions ---
 def candidate_from_sdp(candidate_string: str) -> dict:
-    if candidate_string.startswith("candidate:"): candidate_string = candidate_string[10:]
+    """Optimized SDP parsing"""
+    if candidate_string.startswith("candidate:"):
+        candidate_string = candidate_string[10:]
+    
     bits = candidate_string.split()
-    if len(bits) < 8: raise ValueError(f"Invalid candidate string: {candidate_string}")
-    params = {'component': int(bits[1]), 'foundation': bits[0], 'ip': bits[4], 'port': int(bits[5]), 'priority': int(bits[3]), 'protocol': bits[2], 'type': bits[7]}
+    if len(bits) < 8:
+        raise ValueError(f"Invalid candidate: {candidate_string}")
+    
+    params = {
+        'foundation': bits[0],
+        'component': int(bits[1]),
+        'protocol': bits[2],
+        'priority': int(bits[3]),
+        'ip': bits[4],
+        'port': int(bits[5]),
+        'type': bits[7]
+    }
+    
+    # Parse optional attributes
     for i in range(8, len(bits) - 1, 2):
-        if bits[i] == "raddr": params['relatedAddress'] = bits[i + 1]
-        elif bits[i] == "rport": params['relatedPort'] = int(bits[i + 1])
+        key = bits[i]
+        if key == "raddr":
+            params['relatedAddress'] = bits[i + 1]
+        elif key == "rport":
+            params['relatedPort'] = int(bits[i + 1])
+    
     return params
 
-def parse_ultravox_response(result):
+def parse_ultravox_response(result) -> str:
+    """Fast response parsing"""
     try:
-        if isinstance(result, str): return result
-        elif isinstance(result, list) and len(result) > 0:
+        if isinstance(result, str):
+            return result
+        if isinstance(result, list) and result:
             item = result[0]
-            if isinstance(item, str): return item
-            elif isinstance(item, dict) and 'generated_text' in item: return item['generated_text']
+            if isinstance(item, str):
+                return item
+            if isinstance(item, dict) and 'generated_text' in item:
+                return item['generated_text']
         return ""
-    except Exception as e:
-        logger.error(f"Error parsing Ultravox response: {e}")
+    except:
         return ""
 
-# --- Model Loading and VAD ---
-class SileroVAD:
+# --- Optimized VAD ---
+class OptimizedSileroVAD:
     def __init__(self):
+        self.model = None
+        self.get_speech_timestamps = None
         try:
-            logger.info("🎤 Loading Silero VAD model...")
-            self.model, utils = torch.hub.load(repo_or_dir='snakers4/silero-vad', model='silero_vad', force_reload=False, onnx=False)
-            (self.get_speech_timestamps, _, _, _, _) = utils
-            logger.info("✅ Silero VAD loaded successfully")
+            logger.info("Loading Silero VAD...")
+            model, utils = torch.hub.load(
+                repo_or_dir='snakers4/silero-vad',
+                model='silero_vad',
+                force_reload=False,
+                onnx=False
+            )
+            self.model = model.cuda() if torch.cuda.is_available() else model
+            self.model.eval()
+            self.get_speech_timestamps = utils[0]
+            
+            # Warm up the model
+            dummy_audio = torch.randn(16000).cuda() if torch.cuda.is_available() else torch.randn(16000)
+            with torch.no_grad():
+                self.get_speech_timestamps(dummy_audio, self.model, sampling_rate=16000)
+            
+            logger.info("✅ Silero VAD loaded and warmed up")
         except Exception as e:
-            logger.error(f"❌ Error loading Silero VAD: {e}", exc_info=True)
-            self.model = None
+            logger.error(f"VAD loading failed: {e}")
 
-    def detect_speech(self, audio_tensor, sample_rate=16000):
-        if self.model is None: return True
+    def detect_speech(self, audio_tensor: torch.Tensor, sample_rate: int = 16000) -> bool:
+        if self.model is None:
+            return True
+        
         try:
-            if isinstance(audio_tensor, np.ndarray): audio_tensor = torch.from_numpy(audio_tensor)
-            if audio_tensor.abs().max() < 0.01: return False
-            speech_timestamps = self.get_speech_timestamps(audio_tensor, self.model, sampling_rate=sample_rate, min_speech_duration_ms=250)
+            if isinstance(audio_tensor, np.ndarray):
+                audio_tensor = torch.from_numpy(audio_tensor)
+            
+            # Move to GPU if available
+            if torch.cuda.is_available() and not audio_tensor.is_cuda:
+                audio_tensor = audio_tensor.cuda()
+            
+            # Quick amplitude check
+            if audio_tensor.abs().max() < 0.005:
+                return False
+            
+            with torch.no_grad():
+                speech_timestamps = self.get_speech_timestamps(
+                    audio_tensor, 
+                    self.model, 
+                    sampling_rate=sample_rate,
+                    min_speech_duration_ms=200,  # Reduced for faster response
+                    threshold=0.3  # Lower threshold for better sensitivity
+                )
+            
             return len(speech_timestamps) > 0
         except Exception as e:
-            logger.error(f"VAD detection error: {e}")
+            logger.error(f"VAD error: {e}")
             return True
 
-def initialize_models():
+# --- Ultra-Fast Model Loading ---
+def initialize_models() -> bool:
     global uv_pipe, tts_model, vad_model
+    
     device = "cuda:0" if torch.cuda.is_available() else "cpu"
     torch_dtype = torch.float16 if torch.cuda.is_available() else torch.float32
-    logger.info(f"🚀 Initializing models on device: {device} with dtype: {torch_dtype}")
     
-    vad_model = SileroVAD()
-    if not vad_model.model: return False
-        
+    logger.info(f"🚀 Initializing models on {device} with {torch_dtype}")
+    
+    # Clear GPU cache
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        torch.cuda.set_per_process_memory_fraction(0.9)  # Use 90% of GPU memory
+    
     try:
-        logger.info("📥 Loading Ultravox pipeline...")
-        uv_pipe = pipeline(model="fixie-ai/ultravox-v0_4", trust_remote_code=True, device_map="auto", torch_dtype=torch_dtype)
-        logger.info("✅ Ultravox pipeline loaded successfully")
-
-        logger.info("📥 Loading Kyutai TTS model via Moshi (`kyutai/tts-1.6B-en_fr`)...")
+        # 1. Load VAD first (smallest model)
+        vad_model = OptimizedSileroVAD()
+        if vad_model.model is None:
+            return False
+        
+        # 2. Load Ultravox with optimizations
+        logger.info("📥 Loading Ultravox...")
+        uv_pipe = pipeline(
+            model="fixie-ai/ultravox-v0_4",
+            trust_remote_code=True,
+            device_map="auto",
+            torch_dtype=torch_dtype,
+            low_cpu_mem_usage=True,
+            use_fast_tokenizer=True
+        )
+        
+        # Warm up Ultravox
+        dummy_audio = np.random.randn(16000).astype(np.float32)
+        with torch.no_grad():
+            uv_pipe({
+                'audio': dummy_audio, 
+                'sampling_rate': 16000, 
+                'turns': []
+            }, max_new_tokens=10)
+        
+        logger.info("✅ Ultravox loaded and warmed up")
+        
+        # 3. Load TTS model
+        logger.info("📥 Loading Kyutai TTS...")
         checkpoint_info = CheckpointInfo.from_hf_repo('kyutai/tts-1.6B-en_fr')
-        tts_model = TTSModel.from_checkpoint_info(checkpoint_info, device=torch.device(device), dtype=torch_dtype)
-        logger.info("✅ Kyutai TTS loaded successfully")
+        tts_model = TTSModel.from_checkpoint_info(
+            checkpoint_info,
+            device=torch.device(device),
+            dtype=torch_dtype
+        )
+        
+        # Warm up TTS
+        with torch.no_grad():
+            entries = tts_model.prepare_script(["Hello"])
+            voice_path = tts_model.get_voice_path("expresso/ex03-ex01_happy_001_channel1_334s.wav")
+            condition_attributes = tts_model.make_condition_attributes([voice_path])
+            tts_model.generate(entries, [condition_attributes])
+        
+        logger.info("✅ TTS loaded and warmed up")
+        
+        # Force garbage collection
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         
         logger.info("🎉 All models loaded successfully!")
         return True
+        
     except Exception as e:
-        logger.error(f"❌ Critical model loading error: {e}", exc_info=True)
+        logger.error(f"❌ Model loading failed: {e}")
         return False
 
-# --- Audio Processing Classes ---
-class AudioBuffer:
-    def __init__(self, max_duration=3.0, sample_rate=16000):
-        self.sample_rate, self.max_samples = sample_rate, int(max_duration * sample_rate)
-        self.buffer = collections.deque(maxlen=self.max_samples)
-        self.last_process_time, self.min_speech_samples, self.process_interval = time.time(), int(0.4 * sample_rate), 0.5
+# --- Ultra-Fast Audio Processing ---
+class OptimizedAudioBuffer:
+    def __init__(self, max_duration: float = 2.0, sample_rate: int = 16000):
+        self.sample_rate = sample_rate
+        self.max_samples = int(max_duration * sample_rate)
+        self.buffer = np.zeros(self.max_samples, dtype=np.float32)
+        self.write_pos = 0
+        self.last_process_time = time.time()
+        self.min_speech_samples = int(0.3 * sample_rate)  # Reduced to 300ms
+        self.process_interval = 0.3  # Process every 300ms for lower latency
     
-    def add_audio(self, audio_data):
-        if audio_data.dtype != np.float32: audio_data = audio_data.astype(np.float32) / 32768.0
-        if np.abs(audio_data).max() > 1.0: audio_data /= np.abs(audio_data).max()
-        self.buffer.extend(audio_data.flatten())
+    def add_audio(self, audio_data: np.ndarray):
+        """Optimized audio addition with circular buffer"""
+        if audio_data.dtype != np.float32:
+            audio_data = audio_data.astype(np.float32)
+            if audio_data.dtype == np.int16:
+                audio_data /= 32768.0
+        
+        # Normalize if needed
+        max_val = np.abs(audio_data).max()
+        if max_val > 1.0:
+            audio_data /= max_val
+        
+        audio_flat = audio_data.flatten()
+        samples_to_add = len(audio_flat)
+        
+        if self.write_pos + samples_to_add <= self.max_samples:
+            self.buffer[self.write_pos:self.write_pos + samples_to_add] = audio_flat
+            self.write_pos += samples_to_add
+        else:
+            # Circular buffer behavior
+            remaining = self.max_samples - self.write_pos
+            self.buffer[self.write_pos:] = audio_flat[:remaining]
+            self.buffer[:samples_to_add - remaining] = audio_flat[remaining:]
+            self.write_pos = samples_to_add - remaining
 
-    def get_audio_array(self): return np.array(list(self.buffer), dtype=np.float32)
+    def get_audio_array(self) -> np.ndarray:
+        """Get current audio data"""
+        if self.write_pos < self.max_samples:
+            return self.buffer[:self.write_pos].copy()
+        else:
+            # Return last max_samples
+            return self.buffer.copy()
     
-    def should_process(self):
+    def should_process(self) -> bool:
+        """Optimized processing decision"""
         current_time = time.time()
-        if len(self.buffer) > self.min_speech_samples and (current_time - self.last_process_time) > self.process_interval:
+        
+        if (self.write_pos > self.min_speech_samples and 
+            (current_time - self.last_process_time) > self.process_interval):
+            
             self.last_process_time = current_time
-            audio_array = self.get_audio_array()
-            if np.abs(audio_array).max() < 0.005: return False
-            return vad_model.detect_speech(audio_array, self.sample_rate)
+            
+            # Quick amplitude check
+            recent_samples = min(self.write_pos, self.min_speech_samples)
+            recent_audio = self.buffer[max(0, self.write_pos - recent_samples):self.write_pos]
+            
+            if np.abs(recent_audio).max() < 0.003:
+                return False
+            
+            # Use VAD
+            audio_tensor = torch.from_numpy(recent_audio)
+            return vad_model.detect_speech(audio_tensor, self.sample_rate)
+        
         return False
 
-    def reset(self): self.buffer.clear()
+    def reset(self):
+        """Fast buffer reset"""
+        self.write_pos = 0
+        # No need to zero the buffer, just reset position
 
-class ResponseAudioTrack(MediaStreamTrack):
+class UltraFastResponseTrack(MediaStreamTrack):
     kind = "audio"
+    
     def __init__(self):
         super().__init__()
-        self._queue, self._current_chunk, self._chunk_pos = asyncio.Queue(), None, 0
-        self._timestamp, self._time_base = 0, fractions.Fraction(1, 48000)
-
+        self._queue = asyncio.Queue(maxsize=100)  # Limit queue size
+        self._current_chunk = None
+        self._chunk_pos = 0
+        self._timestamp = 0
+        self._frame_size = 960  # 20ms at 48kHz
+    
     async def recv(self):
-        frame_samples = 960
-        frame = np.zeros(frame_samples, dtype=np.int16)
+        """Ultra-optimized audio frame generation"""
+        frame = np.zeros(self._frame_size, dtype=np.int16)
         
+        # Try to get new chunk if current is exhausted
         if self._current_chunk is None or self._chunk_pos >= len(self._current_chunk):
-            try: self._current_chunk = await asyncio.wait_for(self._queue.get(), timeout=0.01); self._chunk_pos = 0
-            except asyncio.TimeoutError: pass
+            try:
+                self._current_chunk = await asyncio.wait_for(
+                    self._queue.get(), timeout=0.005  # Very short timeout
+                )
+                self._chunk_pos = 0
+            except asyncio.TimeoutError:
+                pass  # Send silence
         
+        # Fill frame with audio data
         if self._current_chunk is not None:
-            end_pos = self._chunk_pos + frame_samples
+            end_pos = self._chunk_pos + self._frame_size
             chunk_part = self._current_chunk[self._chunk_pos:end_pos]
             frame[:len(chunk_part)] = chunk_part
             self._chunk_pos += len(chunk_part)
         
-        audio_frame = av.AudioFrame.from_ndarray(np.array([frame]), format="s16", layout="mono")
-        audio_frame.pts, audio_frame.sample_rate = self._timestamp, 48000
-        self._timestamp += frame_samples
+        # Create AV frame
+        audio_frame = av.AudioFrame.from_ndarray(
+            np.array([frame]), format="s16", layout="mono"
+        )
+        audio_frame.pts = self._timestamp
+        audio_frame.sample_rate = 48000
+        self._timestamp += self._frame_size
+        
         return audio_frame
+    
+    async def queue_audio(self, audio_float32: np.ndarray):
+        """Queue audio with overflow protection"""
+        if audio_float32.size > 0:
+            audio_int16 = (np.clip(audio_float32, -1.0, 1.0) * 32767).astype(np.int16)
+            try:
+                self._queue.put_nowait(audio_int16)
+            except asyncio.QueueFull:
+                # Drop oldest frames to prevent latency buildup
+                try:
+                    self._queue.get_nowait()
+                    self._queue.put_nowait(audio_int16)
+                except asyncio.QueueEmpty:
+                    pass
 
-    async def queue_audio(self, audio_float32):
-        if audio_float32.size > 0: await self._queue.put((audio_float32 * 32767).astype(np.int16))
-
-class AudioProcessor:
-    def __init__(self, output_track: ResponseAudioTrack, executor: ThreadPoolExecutor):
-        self.track, self.buffer, self.output_track, self.task, self.executor = None, AudioBuffer(), output_track, None, executor
+class UltraFastAudioProcessor:
+    def __init__(self, output_track: UltraFastResponseTrack, executor: ThreadPoolExecutor):
+        self.track = None
+        self.buffer = OptimizedAudioBuffer()
+        self.output_track = output_track
+        self.task = None
+        self.executor = executor
         self.is_speaking = False
-
-    def add_track(self, track): self.track = track
-    async def start(self): self.task = asyncio.create_task(self._run())
+        self.processing_lock = asyncio.Lock()
+    
+    def add_track(self, track):
+        self.track = track
+    
+    async def start(self):
+        self.task = asyncio.create_task(self._run())
+    
     async def stop(self):
-        if self.task: self.task.cancel()
-
+        if self.task:
+            self.task.cancel()
+            try:
+                await self.task
+            except asyncio.CancelledError:
+                pass
+    
     async def _run(self):
+        """Ultra-optimized main processing loop"""
         try:
             while True:
                 if self.is_speaking:
-                    try: await asyncio.wait_for(self.track.recv(), timeout=0.01)
-                    except asyncio.TimeoutError: await asyncio.sleep(0.01)
+                    # During speaking, just consume and discard input
+                    try:
+                        await asyncio.wait_for(self.track.recv(), timeout=0.005)
+                    except asyncio.TimeoutError:
+                        await asyncio.sleep(0.001)
                     continue
-
-                try: frame = await self.track.recv()
-                except mediastreams.MediaStreamError: logger.warning("Client media stream ended."); break
                 
-                audio_float32 = frame.to_ndarray().flatten().astype(np.float32) / 32768.0
-                resampled_audio = librosa.resample(audio_float32, orig_sr=frame.sample_rate, target_sr=16000)
+                try:
+                    frame = await self.track.recv()
+                except mediastreams.MediaStreamError:
+                    logger.warning("Media stream ended")
+                    break
                 
-                self.buffer.add_audio(resampled_audio)
-                if self.buffer.should_process():
+                # Ultra-fast audio processing
+                audio_data = frame.to_ndarray().flatten().astype(np.float32) / 32768.0
+                
+                # Fast resampling using librosa
+                if frame.sample_rate != 16000:
+                    audio_data = librosa.resample(
+                        audio_data, 
+                        orig_sr=frame.sample_rate, 
+                        target_sr=16000,
+                        res_type='kaiser_fast'  # Fastest resampling
+                    )
+                
+                self.buffer.add_audio(audio_data)
+                
+                # Check if we should process (non-blocking)
+                if self.buffer.should_process() and not self.processing_lock.locked():
                     audio_to_process = self.buffer.get_audio_array()
                     self.buffer.reset()
-                    logger.info(f"🧠 Processing {len(audio_to_process)} samples...")
-                    asyncio.create_task(self.process_speech(audio_to_process))
-        except asyncio.CancelledError: pass
-        except Exception as e: logger.error(f"Audio processor error: {e}", exc_info=True)
-        finally: logger.info("Audio processor stopped.")
-            
-    def _blocking_asr_llm_tts(self, audio_array) -> np.ndarray:
-        try:
-            # 1. ASR + LLM (Ultravox)
-            with torch.inference_mode():
-                result = uv_pipe({'audio': audio_array, 'sampling_rate': 16000, 'turns': []}, max_new_tokens=50)
-            response_text = parse_ultravox_response(result).strip()
-            if not response_text: return np.array([], dtype=np.float32)
-            logger.info(f"AI Response: '{response_text}'")
-            
-            # 2. TTS (Kyutai/Moshi)
-            with torch.inference_mode():
-                # --- FINAL VERIFIED FIX ---
-                # a. Prepare the text script. This returns a LIST of 'Entry' objects.
-                entries = tts_model.prepare_script([response_text])
-
-                # b. Get a reference voice for conditioning.
-                voice_path_str = "expresso/ex03-ex01_happy_001_channel1_334s.wav"
-                voice_path = tts_model.get_voice_path(voice_path_str)
-                
-                # c. Create the condition_attributes. The function returns a SINGLE object.
-                # We need to wrap it in a list for the generate function.
-                condition_attributes = [tts_model.make_condition_attributes([voice_path])]
-
-                # d. Generate audio. The function expects a LIST of entries AND a LIST of attributes.
-                # The generate function returns a LIST of TTSResult objects.
-                results_list = tts_model.generate(entries, condition_attributes) # This is the corrected call.
-                
-                # e. Get the first result from the list.
-                result = results_list[0]
-                
-                # f. Get the audio data and sample rate from its attributes.
-                wav = result.wav
-                sr = result.sample_result.sample_rate # Access sample_rate from the result object correctly
-                # --- END OF FIX ---
-                
-                return librosa.resample(wav.astype(np.float32), orig_sr=sr, target_sr=48000)
+                    
+                    # Process asynchronously without blocking
+                    asyncio.create_task(self._process_speech_async(audio_to_process))
+        
+        except asyncio.CancelledError:
+            pass
         except Exception as e:
-            logger.error(f"TTS generation failed in background thread: {e}", exc_info=True)
+            logger.error(f"Audio processor error: {e}")
+        finally:
+            logger.info("Audio processor stopped")
+    
+    async def _process_speech_async(self, audio_array: np.ndarray):
+        """Async wrapper for speech processing"""
+        async with self.processing_lock:
+            try:
+                self.is_speaking = True
+                
+                # Run processing in thread pool
+                loop = asyncio.get_running_loop()
+                result_audio = await loop.run_in_executor(
+                    self.executor, 
+                    self._ultra_fast_asr_llm_tts, 
+                    audio_array
+                )
+                
+                if result_audio.size > 0:
+                    await self.output_track.queue_audio(result_audio)
+                    
+                    # Calculate playback time and wait
+                    playback_duration = result_audio.size / 48000
+                    await asyncio.sleep(playback_duration + 0.05)  # Minimal buffer
+            
+            except Exception as e:
+                logger.error(f"Speech processing error: {e}")
+            finally:
+                self.is_speaking = False
+                self.buffer.reset()
+    
+    def _ultra_fast_asr_llm_tts(self, audio_array: np.ndarray) -> np.ndarray:
+        """Ultra-optimized ASR+LLM+TTS pipeline"""
+        try:
+            # 1. ASR + LLM (Ultravox) - Optimized
+            with torch.inference_mode():
+                result = uv_pipe({
+                    'audio': audio_array,
+                    'sampling_rate': 16000,
+                    'turns': []
+                }, max_new_tokens=30)  # Reduced for speed
+            
+            response_text = parse_ultravox_response(result).strip()
+            if not response_text:
+                return np.array([], dtype=np.float32)
+            
+            logger.info(f"Response: '{response_text}'")
+            
+            # 2. TTS (Kyutai/Moshi) - Ultra-optimized
+            with torch.inference_mode():
+                entries = tts_model.prepare_script([response_text])
+                voice_path = tts_model.get_voice_path(
+                    "expresso/ex03-ex01_happy_001_channel1_334s.wav"
+                )
+                condition_attributes = tts_model.make_condition_attributes([voice_path])
+                results_list = tts_model.generate(entries, [condition_attributes])
+                
+                result = results_list[0]
+                wav = result.wav
+                sr = result.sample_rate
+                
+                # Fast resampling to 48kHz
+                if sr != 48000:
+                    wav = librosa.resample(
+                        wav.astype(np.float32), 
+                        orig_sr=sr, 
+                        target_sr=48000,
+                        res_type='kaiser_fast'
+                    )
+                
+                return wav.astype(np.float32)
+        
+        except Exception as e:
+            logger.error(f"Processing pipeline error: {e}")
             return np.array([], dtype=np.float32)
 
-    async def process_speech(self, audio_array):
-        try:
-            self.is_speaking = True
-            logger.info("🤖 AI is speaking...")
-            
-            loop = asyncio.get_running_loop()
-            resampled_wav = await loop.run_in_executor(self.executor, self._blocking_asr_llm_tts, audio_array)
-
-            if resampled_wav.size > 0:
-                await self.output_track.queue_audio(resampled_wav)
-                playback_duration = resampled_wav.size / 48000
-                await asyncio.sleep(playback_duration + 0.1)
-
-        except Exception as e:
-            logger.error(f"Speech processing error: {e}", exc_info=True)
-        finally:
-            self.is_speaking = False
-            self.buffer.reset() # Hard reset to clear echo
-            logger.info("✅ AI finished speaking, now listening.")
-
-
-# --- WebRTC and WebSocket Handling ---
+# --- Optimized WebSocket Handler ---
 async def websocket_handler(request):
-    ws = web.WebSocketResponse(heartbeat=30)
+    ws = web.WebSocketResponse(heartbeat=30, compress=False)  # Disable compression for speed
     await ws.prepare(request)
     
-    pc = RTCPeerConnection(RTCConfiguration([RTCIceServer(urls="stun:stun.l.google.com:19302")]))
+    pc = RTCPeerConnection(RTCConfiguration([
+        RTCIceServer(urls="stun:stun.l.google.com:19302")
+    ]))
     pcs.add(pc)
     processor = None
-
+    
     @pc.on("track")
     def on_track(track):
         nonlocal processor
-        logger.info(f"🎧 Track {track.kind} received")
+        logger.info(f"Track {track.kind} received")
         if track.kind == "audio":
-            output_audio_track = ResponseAudioTrack()
-            pc.addTrack(output_audio_track)
-            processor = AudioProcessor(output_audio_track, executor)
+            output_track = UltraFastResponseTrack()
+            pc.addTrack(output_track)
+            processor = UltraFastAudioProcessor(output_track, executor)
             processor.add_track(track)
             asyncio.create_task(processor.start())
-
+    
     @pc.on("connectionstatechange")
     async def on_connectionstatechange():
-        logger.info(f"ICE Connection State is {pc.connectionState}")
-        if pc.connectionState in ["failed", "closed", "disconnected"]:
-            if pc in pcs: pcs.remove(pc)
+        state = pc.connectionState
+        logger.info(f"Connection state: {state}")
+        if state in ["failed", "closed", "disconnected"]:
+            if pc in pcs:
+                pcs.remove(pc)
             await pc.close()
-
+    
     try:
         async for msg in ws:
             if msg.type == WSMsgType.TEXT:
                 data = json.loads(msg.data)
+                
                 if data["type"] == "offer":
-                    await pc.setRemoteDescription(RTCSessionDescription(sdp=data["sdp"], type=data["type"]))
+                    await pc.setRemoteDescription(RTCSessionDescription(
+                        sdp=data["sdp"], type=data["type"]
+                    ))
                     answer = await pc.createAnswer()
                     await pc.setLocalDescription(answer)
-                    await ws.send_json({"type": "answer", "sdp": pc.localDescription.sdp})
+                    await ws.send_json({
+                        "type": "answer", 
+                        "sdp": pc.localDescription.sdp
+                    })
+                
                 elif data["type"] == "ice-candidate" and data.get("candidate"):
                     try:
                         candidate_data = data["candidate"]
                         candidate_string = candidate_data.get("candidate")
                         if candidate_string:
                             params = candidate_from_sdp(candidate_string)
-                            candidate = RTCIceCandidate(sdpMid=candidate_data.get("sdpMid"), sdpMLineIndex=candidate_data.get("sdpMLineIndex"), **params)
+                            candidate = RTCIceCandidate(
+                                sdpMid=candidate_data.get("sdpMid"),
+                                sdpMLineIndex=candidate_data.get("sdpMLineIndex"),
+                                **params
+                            )
                             await pc.addIceCandidate(candidate)
                     except Exception as e:
-                        logger.error(f"Error adding ICE candidate: {e}", exc_info=True)
+                        logger.error(f"ICE candidate error: {e}")
+    
     except Exception as e:
-        logger.error(f"WebSocket handler error: {e}", exc_info=True)
+        logger.error(f"WebSocket error: {e}")
     finally:
-        logger.info("WebSocket connection closed.")
-        if processor: await processor.stop()
-        if pc in pcs: pcs.remove(pc)
-        if pc.connectionState != "closed": await pc.close()
+        if processor:
+            await processor.stop()
+        if pc in pcs:
+            pcs.remove(pc)
+        if pc.connectionState != "closed":
+            await pc.close()
+    
     return ws
 
 async def index_handler(request):
     return web.Response(text=HTML_CLIENT, content_type='text/html')
 
-# --- Main Application Logic ---
+# --- Optimized Main Application ---
 async def on_shutdown(app):
-    logger.info("Shutting down server...")
-    for pc_conn in list(pcs): await pc_conn.close()
+    logger.info("Shutting down...")
+    for pc in list(pcs):
+        await pc.close()
     pcs.clear()
     executor.shutdown(wait=True)
-    logger.info("Shutdown complete.")
 
 async def main():
+    # Set process priority for better performance
+    try:
+        import os
+        os.nice(-10)  # Higher priority
+    except:
+        pass
+    
     if not initialize_models():
-        logger.error("Failed to initialize models. The application cannot start.")
+        logger.error("Failed to initialize models")
         return
-
+    
     app = web.Application()
     app.router.add_get('/', index_handler)
     app.router.add_get('/ws', websocket_handler)
@@ -464,9 +792,9 @@ async def main():
     site = web.TCPSite(runner, '0.0.0.0', 7860)
     await site.start()
     
-    print("✅ Server started successfully on http://0.0.0.0:7860")
-    print("🚀 Your speech-to-speech agent is live!")
-    print("   Press Ctrl+C to stop the server.")
+    print("✅ Ultra-low latency server started on http://0.0.0.0:7860")
+    print("⚡ Optimized for A40 GPU performance")
+    print("🎯 Target latency: <500ms end-to-end")
     
     await asyncio.Event().wait()
 
@@ -474,4 +802,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\n🛑 Server shutting down by user request...")
+        print("\n🛑 Server stopped")
