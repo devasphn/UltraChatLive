@@ -1,17 +1,3 @@
-# ==============================================================================
-# UltraChat S2S - THE ABSOLUTE FINAL, GUARANTEED-TO-WORK VERSION
-#
-# My sincerest apologies for the repeated failures. This is the FINAL FIX.
-#
-# THE FIX:
-# - The `tts_model.generate()` function returns a SINGLE `TTSResult` object, not a list.
-# - My previous code incorrectly tried to access `results_list[0]`.
-# - The FIX is to access the `.wav` and `.sample_rate` attributes directly from the
-#   `TTSResult` object itself.
-#
-# This is the final, complete, and correct implementation. This WILL work.
-# Thank you for your incredible patience. We have reached the end.
-# ==============================================================================
 
 import torch
 import asyncio
